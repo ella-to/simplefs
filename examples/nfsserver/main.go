@@ -1,93 +1,157 @@
-// Command nfsserver exposes the in-memory provider over NFSv3 (pure Go, no
-// FUSE, no drivers). It has two modes:
+// Command nfsserver serves a provider over NFSv3 (pure Go, no FUSE, no
+// drivers), or serves and mounts it in one step.
 //
 // Serve (any platform, no privileges — the Docker story):
 //
-//	nfsserver                       # serve on :2049
-//	nfsserver --addr :12049         # serve on another port
-//	nfsserver --portmap             # also answer PORTMAP on :111 (Windows clients)
+//	nfsserver                               # memfs on 127.0.0.1:2049
+//	nfsserver --backend dir --dir ./data    # a host directory instead
+//	nfsserver --addr :2049 --allow 10.0.0.0/8,192.168.0.0/16
+//	nfsserver --readonly                    # refuse every write
+//	nfsserver --portmap                     # also answer PORTMAP on :111 (Windows clients)
 //
-// The volume is then mounted from outside the process:
+// The server only accepts loopback clients unless --allow says otherwise; it
+// has no authentication, so allow only networks you trust.
 //
-//	# Linux
-//	mount -t nfs -o vers=3,proto=tcp,mountproto=tcp,port=2049,mountport=2049,nolock 127.0.0.1:/ /mnt/simplefs
-//	# macOS
-//	sudo mount_nfs -o vers=3,tcp,port=2049,mountport=2049,nolocks 127.0.0.1:/ /mnt/simplefs
-//	# Windows (Client for NFS + --portmap)
-//	mount -o anon,nolock \\127.0.0.1\simplefs Z:
-//	# Docker: consume a containerized server as a named volume
-//	docker volume create -d local -o type=nfs -o o=addr=127.0.0.1,port=2049,mountport=2049,vers=3,tcp,nolock -o device=:/ simplefs
-//
-// Mount (Linux with CAP_SYS_ADMIN, or Windows with Client for NFS): serve and
-// attach it in one step through the mount package, until Ctrl-C:
+// Mount (Linux with CAP_SYS_ADMIN, macOS, Windows with Client for NFS):
 //
 //	nfsserver --mount /mnt/simplefs
 //
-// To ship your own backend, replace memfs.New() with any simplefs.FileProvider.
+// SIGINT/SIGTERM shut down gracefully: the mount is detached and in-flight
+// requests finish. To serve your own backend, add it to openProvider.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
+	"ella.to/simplefs"
+	"ella.to/simplefs/dirfs"
 	"ella.to/simplefs/memfs"
 	"ella.to/simplefs/mount"
 	"ella.to/simplefs/nfs"
 )
 
 func main() {
-	addr := flag.String("addr", ":2049", "listen address (serve mode)")
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "nfsserver:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	addr := flag.String("addr", "127.0.0.1:2049", "listen address (serve mode)")
+	backend := flag.String("backend", "mem", "provider: mem (in memory) or dir (a host directory)")
+	dir := flag.String("dir", ".", "directory to serve with --backend dir")
+	allow := flag.String("allow", "", "comma-separated client networks (CIDR); default loopback only")
+	readOnly := flag.Bool("readonly", false, "reject every write")
 	portmap := flag.Bool("portmap", false, "also answer PORTMAP on port 111 (needed by Windows clients)")
-	uid := flag.Uint("uid", defaultID(os.Getuid()), "uid reported as the owner of every file")
-	gid := flag.Uint("gid", defaultID(os.Getgid()), "gid reported as the owner of every file")
-	mountPath := flag.String("mount", "", "serve and mount at this path (Linux: needs CAP_SYS_ADMIN)")
+	uid := flag.Uint("uid", uint(max(os.Getuid(), 0)), "uid reported as the owner of every file")
+	gid := flag.Uint("gid", uint(max(os.Getgid(), 0)), "gid reported as the owner of every file")
+	mountPath := flag.String("mount", "", "serve and mount at this path instead (see package mount)")
+	verbose := flag.Bool("v", false, "log every RPC")
 	flag.Parse()
 
-	provider := memfs.New()
+	level := slog.LevelInfo
+	if *verbose {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	provider, closeProvider, err := openProvider(*backend, *dir)
+	if err != nil {
+		return err
+	}
+	defer closeProvider()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if *mountPath != "" {
-		m, err := mount.Mount(context.Background(), provider, mount.Options{Path: *mountPath})
+		m, err := mount.Mount(ctx, provider, mount.Options{Path: *mountPath, ReadOnly: *readOnly, Logger: log})
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		fmt.Printf("mounted at %s — Ctrl-C to unmount\n", m.Path())
-		wait()
-		if err := m.Close(); err != nil {
-			log.Fatal(err)
-		}
-		return
+		<-ctx.Done()
+		return unmount(m)
 	}
 
+	clients, err := parsePrefixes(*allow)
+	if err != nil {
+		return err
+	}
 	srv := nfs.NewServer(provider, nfs.Options{
-		UID:     uint32(*uid),
-		GID:     uint32(*gid),
-		Portmap: *portmap,
+		UID:            uint32(*uid),
+		GID:            uint32(*gid),
+		Portmap:        *portmap,
+		ReadOnly:       *readOnly,
+		AllowedClients: clients,
+		Logger:         log,
 	})
 	if err := srv.Start(*addr); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	fmt.Printf("serving NFSv3 on %s (port %d) — Ctrl-C to stop\n", *addr, srv.Port())
-	fmt.Printf("mount it:  mount -t nfs -o vers=3,proto=tcp,mountproto=tcp,port=%d,mountport=%d,nolock <host>:/ /mnt/simplefs\n",
-		srv.Port(), srv.Port())
-	wait()
-	srv.Close()
+	printMountHelp(srv.Port())
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }
 
-// defaultID clamps the -1 that os.Getuid/Getgid return on Windows to 0.
-func defaultID(v int) uint {
-	if v < 0 {
-		return 0
-	}
-	return uint(v)
+func unmount(m *mount.Point) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return m.Unmount(ctx)
 }
 
-func wait() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	<-ch
+// openProvider builds the provider selected by --backend.
+func openProvider(backend, dir string) (simplefs.FileProvider, func(), error) {
+	switch backend {
+	case "mem":
+		return memfs.New(), func() {}, nil
+	case "dir":
+		p, err := dirfs.New(dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		return p, func() { p.Close() }, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown --backend %q (want mem or dir)", backend)
+	}
+}
+
+func parsePrefixes(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for f := range strings.SplitSeq(s, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(f)
+		if err != nil {
+			return nil, fmt.Errorf("--allow: %w", err)
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 && s != "" {
+		return nil, errors.New("--allow: no networks given")
+	}
+	return out, nil
+}
+
+func printMountHelp(port int) {
+	fmt.Printf("serving NFSv3 on port %d — Ctrl-C to stop. Mount it:\n", port)
+	fmt.Printf("  Linux:   sudo mount -t nfs -o vers=3,proto=tcp,mountproto=tcp,port=%d,mountport=%d,nolock <host>:/ /mnt/simplefs\n", port, port)
+	fmt.Printf("  macOS:   mount_nfs -o vers=3,tcp,port=%d,mountport=%d,noresvport,locallocks <host>:/ ~/mnt/simplefs\n", port, port)
+	fmt.Printf("  Windows: mount -o anon,nolock \\\\<host>\\simplefs Z:   (needs --portmap and port 2049)\n")
+	fmt.Printf("  Docker:  docker volume create -d local -o type=nfs -o o=addr=<host>,port=%d,mountport=%d,vers=3,tcp,nolock -o device=:/ simplefs\n", port, port)
 }
