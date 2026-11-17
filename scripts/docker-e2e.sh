@@ -8,18 +8,25 @@
 #   exercises real file I/O through the mount.
 #
 # Scenario B — the in-container mount:
-#   one container runs `nfsserver --mount`, which drives
-#   mount.Mount/mount_linux.go (in-process server + mount(2) syscall,
-#   needs CAP_SYS_ADMIN), and I/O is checked through docker exec.
+#   one container runs `nfsserver --mount`, which drives mount.Mount
+#   (in-process server + mount(2) syscall, needs CAP_SYS_ADMIN), and I/O is
+#   checked through docker exec. The mount must sit at the requested path
+#   itself, not behind a symlink.
+#
+# Scenario C — a crashed server:
+#   the mounting process is SIGKILLed; operations on the mount must fail
+#   (soft mount) instead of hanging, and the next mount.Mount must detach the
+#   stale mount (CleanupStale).
 set -eu
 
 IMG=simplefs-nfs
 NET=simplefs-e2e
 SERVER=simplefs-e2e-server
 MOUNTER=simplefs-e2e-mounter
+CRASHER=simplefs-e2e-crasher
 
 cleanup() {
-    docker rm -f "$SERVER" "$MOUNTER" >/dev/null 2>&1 || true
+    docker rm -f "$SERVER" "$MOUNTER" "$CRASHER" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 cleanup
@@ -75,16 +82,51 @@ echo "== Scenario B: in-container mount via mount.Mount (mount_linux.go)"
 docker run -d --name "$MOUNTER" --cap-add SYS_ADMIN "$IMG" --mount /mnt/simplefs >/dev/null
 docker exec "$MOUNTER" sh -eu -c '
     for i in $(seq 1 20); do
-        [ -d /mnt/simplefs ] && mountpoint -q "$(readlink -f /mnt/simplefs)" && break
+        mountpoint -q /mnt/simplefs && break
         [ "$i" = 20 ] && { echo "mount did not appear"; exit 1; }
         sleep 0.5
     done
+    [ ! -L /mnt/simplefs ] || { echo "/mnt/simplefs is a symlink, not the mount"; exit 1; }
     echo "in-container" > /mnt/simplefs/probe.txt
     [ "$(cat /mnt/simplefs/probe.txt)" = "in-container" ]
     mkdir /mnt/simplefs/dir
     mv /mnt/simplefs/probe.txt /mnt/simplefs/dir/
     [ "$(cat /mnt/simplefs/dir/probe.txt)" = "in-container" ]
     echo "scenario B: OK"
+'
+
+echo "== Scenario C: crashed server -> soft failure, then CleanupStale"
+docker run -d --name "$CRASHER" --cap-add SYS_ADMIN --entrypoint sh "$IMG" -c 'sleep 3600' >/dev/null
+docker exec -d "$CRASHER" nfsserver --mount /mnt/dead
+docker exec "$CRASHER" sh -eu -c '
+    for i in $(seq 1 20); do
+        mountpoint -q /mnt/dead && break
+        [ "$i" = 20 ] && { echo "mount did not appear"; exit 1; }
+        sleep 0.5
+    done
+    echo alive > /mnt/dead/probe
+    pkill -9 nfsserver
+    sleep 1
+
+    start=$(date +%s)
+    set +e
+    timeout -s KILL 90 ls /mnt/dead >/dev/null 2>&1
+    status=$?
+    set -e
+    took=$(( $(date +%s) - start ))
+    [ "$status" != 137 ] || { echo "ls on the dead mount hung"; exit 1; }
+    echo "dead mount failed in ${took}s (status $status)"
+
+    # A new mount cleans up the stale one.
+    nfsserver --mount /mnt/fresh >/dev/null 2>&1 &
+    for i in $(seq 1 20); do
+        mountpoint -q /mnt/fresh && break
+        [ "$i" = 20 ] && { echo "second mount did not appear"; exit 1; }
+        sleep 0.5
+    done
+    if mountpoint -q /mnt/dead; then echo "stale mount not cleaned up"; exit 1; fi
+    kill %1 2>/dev/null || pkill nfsserver
+    echo "scenario C: OK"
 '
 
 echo "docker-e2e: ALL OK"
