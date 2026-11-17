@@ -202,3 +202,26 @@ func TestCleanupStaleAfterCrash(t *testing.T) {
 		}
 	}
 }
+
+func TestMountWebDAV(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("no built-in WebDAV client")
+	}
+	p, m := mountMem(t, mount.Options{Name: "davtest", Backend: mount.WebDAV})
+	if err := os.WriteFile(filepath.Join(m.Path(), "dav.txt"), []byte("over webdav"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := simplefs.ReadFile(t.Context(), p, "/dav.txt"); err != nil || string(got) != "over webdav" {
+		t.Fatalf("provider sees %q, %v", got, err)
+	}
+	if err := os.Mkdir(filepath.Join(m.Path(), "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(m.Path(), "dav.txt"), filepath.Join(m.Path(), "dir", "moved.txt")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(m.Path(), "dir", "moved.txt"))
+	if err != nil || string(data) != "over webdav" {
+		t.Fatalf("read back %q, %v", data, err)
+	}
+}
