@@ -15,7 +15,7 @@ import (
 	"ella.to/simplefs/memfs"
 )
 
-func seeded(t *testing.T) *memfs.MemFS {
+func seeded(t *testing.T) *memfs.FS {
 	t.Helper()
 	ctx := t.Context()
 	p := memfs.New()

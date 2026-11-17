@@ -11,7 +11,7 @@ import (
 	"ella.to/simplefs"
 )
 
-func writeFile(t *testing.T, m *MemFS, path, content string) {
+func writeFile(t *testing.T, m *FS, path, content string) {
 	t.Helper()
 	h, err := simplefs.Create(t.Context(), m, path, 0)
 	if err != nil {
@@ -25,7 +25,7 @@ func writeFile(t *testing.T, m *MemFS, path, content string) {
 	}
 }
 
-func readFile(t *testing.T, m *MemFS, path string) string {
+func readFile(t *testing.T, m *FS, path string) string {
 	t.Helper()
 	h, err := m.Open(t.Context(), path, simplefs.OpenOptions{Read: true})
 	if err != nil {

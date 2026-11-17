@@ -12,7 +12,7 @@ import (
 
 // closeCounter counts handles closed through it.
 type closeCounter struct {
-	*memfs.MemFS
+	*memfs.FS
 	opened, closed atomic.Int32
 }
 
@@ -27,7 +27,7 @@ func (h countedHandle) Close() error {
 }
 
 func (c *closeCounter) Open(ctx context.Context, path string, opts simplefs.OpenOptions) (simplefs.FileHandle, error) {
-	h, err := c.MemFS.Open(ctx, path, opts)
+	h, err := c.FS.Open(ctx, path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -47,8 +47,8 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 func TestOpenCacheUpgradeRetiresBusyHandle(t *testing.T) {
-	p := &closeCounter{MemFS: memfs.New()}
-	h, _ := simplefs.Create(t.Context(), p.MemFS, "/f", 0)
+	p := &closeCounter{FS: memfs.New()}
+	h, _ := simplefs.Create(t.Context(), p.FS, "/f", 0)
 	h.Close()
 
 	c := newOpenCache(p, time.Hour)
@@ -74,8 +74,8 @@ func TestOpenCacheUpgradeRetiresBusyHandle(t *testing.T) {
 }
 
 func TestOpenCacheDropBusyClosesOnRelease(t *testing.T) {
-	p := &closeCounter{MemFS: memfs.New()}
-	h, _ := simplefs.Create(t.Context(), p.MemFS, "/f", 0)
+	p := &closeCounter{FS: memfs.New()}
+	h, _ := simplefs.Create(t.Context(), p.FS, "/f", 0)
 	h.Close()
 
 	c := newOpenCache(p, time.Hour)
@@ -93,8 +93,8 @@ func TestOpenCacheDropBusyClosesOnRelease(t *testing.T) {
 }
 
 func TestOpenCacheSweepsIdle(t *testing.T) {
-	p := &closeCounter{MemFS: memfs.New()}
-	h, _ := simplefs.Create(t.Context(), p.MemFS, "/f", 0)
+	p := &closeCounter{FS: memfs.New()}
+	h, _ := simplefs.Create(t.Context(), p.FS, "/f", 0)
 	h.Close()
 
 	c := newOpenCache(p, 20*time.Millisecond)

@@ -560,18 +560,18 @@ func TestBigWriteMultipleFragments(t *testing.T) {
 
 // timesRecorder records the arguments of every Chtimes call.
 type timesRecorder struct {
-	*memfs.MemFS
+	*memfs.FS
 	atimes, mtimes []time.Time
 }
 
 func (r *timesRecorder) Chtimes(ctx context.Context, path string, atime, mtime time.Time) error {
 	r.atimes = append(r.atimes, atime)
 	r.mtimes = append(r.mtimes, mtime)
-	return r.MemFS.Chtimes(ctx, path, atime, mtime)
+	return r.FS.Chtimes(ctx, path, atime, mtime)
 }
 
 func TestSetattrMtimeOnlyLeavesAtimeZero(t *testing.T) {
-	rec := &timesRecorder{MemFS: memfs.New()}
+	rec := &timesRecorder{FS: memfs.New()}
 	_, c := startServerWith(t, rec, Options{})
 	root := c.mnt()
 	fh := c.create(root, "f")

@@ -77,9 +77,9 @@ func (w *watcher) matches(p string) bool {
 	return w.recursive || p == w.path || simplefs.ParentPath(p) == w.path
 }
 
-// MemFS is an in-memory simplefs.FileProvider. The zero value is not usable; use
+// FS is an in-memory simplefs.FileProvider. The zero value is not usable; use
 // New. All methods are safe for concurrent use.
-type MemFS struct {
+type FS struct {
 	mu       sync.RWMutex
 	root     *node
 	watchers map[*watcher]struct{}
@@ -94,33 +94,33 @@ type MemFS struct {
 }
 
 var (
-	_ simplefs.FileProvider     = (*MemFS)(nil)
-	_ simplefs.SymlinkProvider  = (*MemFS)(nil)
-	_ simplefs.HardLinkProvider = (*MemFS)(nil)
-	_ simplefs.ChmodProvider    = (*MemFS)(nil)
-	_ simplefs.ChownProvider    = (*MemFS)(nil)
-	_ simplefs.ChtimesProvider  = (*MemFS)(nil)
-	_ simplefs.XattrProvider    = (*MemFS)(nil)
-	_ simplefs.StatFSProvider   = (*MemFS)(nil)
-	_ simplefs.WatchProvider    = (*MemFS)(nil)
+	_ simplefs.FileProvider     = (*FS)(nil)
+	_ simplefs.SymlinkProvider  = (*FS)(nil)
+	_ simplefs.HardLinkProvider = (*FS)(nil)
+	_ simplefs.ChmodProvider    = (*FS)(nil)
+	_ simplefs.ChownProvider    = (*FS)(nil)
+	_ simplefs.ChtimesProvider  = (*FS)(nil)
+	_ simplefs.XattrProvider    = (*FS)(nil)
+	_ simplefs.StatFSProvider   = (*FS)(nil)
+	_ simplefs.WatchProvider    = (*FS)(nil)
 )
 
 // DefaultCapacity is the content limit of a filesystem created without
 // WithCapacity.
 const DefaultCapacity = 1 << 30
 
-// Option configures a MemFS.
-type Option func(*MemFS)
+// Option configures a FS.
+type Option func(*FS)
 
 // WithCapacity limits the total file content to n bytes; writes that would
 // exceed it fail with simplefs.ErrNoSpace. StatFS reports this capacity.
 func WithCapacity(n int64) Option {
-	return func(m *MemFS) { m.capacity = n }
+	return func(m *FS) { m.capacity = n }
 }
 
 // New returns an empty in-memory filesystem.
-func New(opts ...Option) *MemFS {
-	m := &MemFS{
+func New(opts ...Option) *FS {
+	m := &FS{
 		root: &node{
 			typ:      simplefs.TypeDir,
 			mode:     0o755,
@@ -141,13 +141,13 @@ func New(opts ...Option) *MemFS {
 
 // reserveLocked reports whether n's content may grow to size bytes without
 // exceeding the capacity. Callers must hold m.mu.
-func (m *MemFS) reserveLocked(n *node, size int64) bool {
+func (m *FS) reserveLocked(n *node, size int64) bool {
 	grow := size - int64(len(n.data))
 	return grow <= 0 || m.usedBytes+grow <= m.capacity
 }
 
 // openHandleLocked registers a new handle. Callers must hold m.mu for writing.
-func (m *MemFS) openHandleLocked(n *node, path string, opts simplefs.OpenOptions) *handle {
+func (m *FS) openHandleLocked(n *node, path string, opts simplefs.OpenOptions) *handle {
 	h := &handle{m: m, n: n, path: path, opts: opts}
 	m.handles[h] = struct{}{}
 	return h
@@ -156,7 +156,7 @@ func (m *MemFS) openHandleLocked(n *node, path string, opts simplefs.OpenOptions
 // setDataLocked replaces n's content, keeping usedBytes current. Content of
 // an unlinked node (still reachable through an open handle) is not counted.
 // Callers must hold m.mu for writing.
-func (m *MemFS) setDataLocked(n *node, data []byte) {
+func (m *FS) setDataLocked(n *node, data []byte) {
 	if n.nlink > 0 {
 		m.usedBytes += int64(len(data)) - int64(len(n.data))
 	}
@@ -164,12 +164,12 @@ func (m *MemFS) setDataLocked(n *node, data []byte) {
 }
 
 // linkLocked records one more directory entry referring to n.
-func (m *MemFS) linkLocked(n *node) { n.nlink++ }
+func (m *FS) linkLocked(n *node) { n.nlink++ }
 
 // unlinkLocked drops one directory entry referring to n. When the last one
 // goes, n's content (and, for a directory, its whole subtree) stops counting
 // toward usedBytes. Callers must hold m.mu for writing.
-func (m *MemFS) unlinkLocked(n *node) {
+func (m *FS) unlinkLocked(n *node) {
 	n.nlink--
 	if n.nlink > 0 {
 		return
@@ -186,7 +186,7 @@ func patherr(op, path string, err error) error {
 
 // walk returns the node at path without following symlinks (Lstat semantics).
 // Callers must hold m.mu.
-func (m *MemFS) walk(path string) (*node, error) {
+func (m *FS) walk(path string) (*node, error) {
 	n := m.root
 	p := simplefs.CleanPath(path)
 	if p == "/" {
@@ -207,7 +207,7 @@ func (m *MemFS) walk(path string) (*node, error) {
 
 // walkParent returns the parent directory node of path and the final path
 // segment. Callers must hold m.mu.
-func (m *MemFS) walkParent(path string) (*node, string, error) {
+func (m *FS) walkParent(path string) (*node, string, error) {
 	p := simplefs.CleanPath(path)
 	if p == "/" {
 		return nil, "", simplefs.ErrInvalid
@@ -228,7 +228,7 @@ func (m *MemFS) walkParent(path string) (*node, string, error) {
 
 // notify delivers ev to every matching watcher. Callers must hold m.mu (read
 // or write); sends never block — a slow watcher drops events.
-func (m *MemFS) notify(ev simplefs.Event) {
+func (m *FS) notify(ev simplefs.Event) {
 	for w := range m.watchers {
 		if w.matches(ev.Path) || (ev.OldPath != "" && w.matches(ev.OldPath)) {
 			select {
@@ -239,7 +239,7 @@ func (m *MemFS) notify(ev simplefs.Event) {
 	}
 }
 
-func (m *MemFS) event(typ simplefs.EventType, path, oldPath string, n *node) {
+func (m *FS) event(typ simplefs.EventType, path, oldPath string, n *node) {
 	var info *simplefs.FileInfo
 	if n != nil {
 		fi := n.info(path)
@@ -249,7 +249,7 @@ func (m *MemFS) event(typ simplefs.EventType, path, oldPath string, n *node) {
 }
 
 // Stat returns metadata for the object at path (without following symlinks).
-func (m *MemFS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error) {
+func (m *FS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error) {
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -264,7 +264,7 @@ func (m *MemFS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error
 // Open opens the file at path. With opts.Create set a missing file is
 // created with opts.Mode (0o644 when zero); with opts.Exclusive set as well
 // an existing file is an error.
-func (m *MemFS) Open(ctx context.Context, path string, opts simplefs.OpenOptions) (simplefs.FileHandle, error) {
+func (m *FS) Open(ctx context.Context, path string, opts simplefs.OpenOptions) (simplefs.FileHandle, error) {
 	p := simplefs.CleanPath(path)
 	if !opts.Read && !opts.Write {
 		opts.Read = true
@@ -312,7 +312,7 @@ func (m *MemFS) Open(ctx context.Context, path string, opts simplefs.OpenOptions
 
 // createFileLocked inserts a new empty file node at p. Callers must hold m.mu
 // for writing.
-func (m *MemFS) createFileLocked(p string, mode simplefs.FileMode) (*node, error) {
+func (m *FS) createFileLocked(p string, mode simplefs.FileMode) (*node, error) {
 	parent, name, err := m.walkParent(p)
 	if err != nil {
 		return nil, err
@@ -327,7 +327,7 @@ func (m *MemFS) createFileLocked(p string, mode simplefs.FileMode) (*node, error
 
 // ReadDir lists the directory at path. Pagination: entries are sorted by
 // name, Page.Token is the last name of the previous page.
-func (m *MemFS) ReadDir(ctx context.Context, path string, page simplefs.Page) (simplefs.DirPage, error) {
+func (m *FS) ReadDir(ctx context.Context, path string, page simplefs.Page) (simplefs.DirPage, error) {
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -371,7 +371,7 @@ func (m *MemFS) ReadDir(ctx context.Context, path string, page simplefs.Page) (s
 }
 
 // Mkdir creates a directory at path. The parent must already exist.
-func (m *MemFS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptions) error {
+func (m *FS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptions) error {
 	mode := opts.Mode
 	if mode == 0 {
 		mode = 0o755
@@ -405,7 +405,7 @@ func (m *MemFS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptio
 
 // Remove deletes the object at path. Non-empty directories require
 // opts.Recursive; opts.Force turns a missing path into a no-op.
-func (m *MemFS) Remove(ctx context.Context, path string, opts simplefs.RemoveOptions) error {
+func (m *FS) Remove(ctx context.Context, path string, opts simplefs.RemoveOptions) error {
 	p := simplefs.CleanPath(path)
 	if p == "/" {
 		return patherr("remove", p, simplefs.ErrInvalid)
@@ -441,7 +441,7 @@ func (m *MemFS) Remove(ctx context.Context, path string, opts simplefs.RemoveOpt
 
 // Rename moves oldPath to newPath. An existing destination requires
 // opts.Overwrite and must be type-compatible (and, for directories, empty).
-func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simplefs.RenameOptions) error {
+func (m *FS) Rename(ctx context.Context, oldPath, newPath string, opts simplefs.RenameOptions) error {
 	op, np := simplefs.CleanPath(oldPath), simplefs.CleanPath(newPath)
 	if op == "/" || np == "/" {
 		return patherr("rename", op, simplefs.ErrInvalid)
@@ -504,7 +504,7 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 }
 
 // Readlink returns the target of the symlink at path.
-func (m *MemFS) Readlink(ctx context.Context, path string) (string, error) {
+func (m *FS) Readlink(ctx context.Context, path string) (string, error) {
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -520,7 +520,7 @@ func (m *MemFS) Readlink(ctx context.Context, path string) (string, error) {
 }
 
 // Symlink creates a symbolic link at linkPath pointing to target.
-func (m *MemFS) Symlink(ctx context.Context, target, linkPath string) error {
+func (m *FS) Symlink(ctx context.Context, target, linkPath string) error {
 	p := simplefs.CleanPath(linkPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -542,7 +542,7 @@ func (m *MemFS) Symlink(ctx context.Context, target, linkPath string) error {
 
 // Link creates a hard link: newPath becomes another name for the file at
 // existingPath (the two share content, mode, and times).
-func (m *MemFS) Link(ctx context.Context, existingPath, newPath string) error {
+func (m *FS) Link(ctx context.Context, existingPath, newPath string) error {
 	ep, np := simplefs.CleanPath(existingPath), simplefs.CleanPath(newPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -570,19 +570,19 @@ func (m *MemFS) Link(ctx context.Context, existingPath, newPath string) error {
 }
 
 // Chmod changes the permission bits of the object at path.
-func (m *MemFS) Chmod(ctx context.Context, path string, mode simplefs.FileMode) error {
+func (m *FS) Chmod(ctx context.Context, path string, mode simplefs.FileMode) error {
 	return m.setMeta("chmod", path, func(n *node) { n.mode = mode })
 }
 
 // Chown changes the ownership of the object at path.
-func (m *MemFS) Chown(ctx context.Context, path string, uid, gid int) error {
+func (m *FS) Chown(ctx context.Context, path string, uid, gid int) error {
 	return m.setMeta("chown", path, func(n *node) { n.uid, n.gid = uid, gid })
 }
 
 // Chtimes changes the modification time of the object at path (atime is
 // accepted for interface compatibility but not stored). A zero mtime leaves
 // the modification time unchanged.
-func (m *MemFS) Chtimes(ctx context.Context, path string, atime, mtime time.Time) error {
+func (m *FS) Chtimes(ctx context.Context, path string, atime, mtime time.Time) error {
 	return m.setMeta("chtimes", path, func(n *node) {
 		if !mtime.IsZero() {
 			n.modTime = mtime
@@ -590,7 +590,7 @@ func (m *MemFS) Chtimes(ctx context.Context, path string, atime, mtime time.Time
 	})
 }
 
-func (m *MemFS) setMeta(op, path string, apply func(*node)) error {
+func (m *FS) setMeta(op, path string, apply func(*node)) error {
 	p := simplefs.CleanPath(path)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -606,7 +606,7 @@ func (m *MemFS) setMeta(op, path string, apply func(*node)) error {
 }
 
 // GetXattr returns the value of the named extended attribute.
-func (m *MemFS) GetXattr(ctx context.Context, path, name string) ([]byte, error) {
+func (m *FS) GetXattr(ctx context.Context, path, name string) ([]byte, error) {
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -623,7 +623,7 @@ func (m *MemFS) GetXattr(ctx context.Context, path, name string) ([]byte, error)
 }
 
 // SetXattr sets the named extended attribute.
-func (m *MemFS) SetXattr(ctx context.Context, path, name string, value []byte) error {
+func (m *FS) SetXattr(ctx context.Context, path, name string, value []byte) error {
 	return m.setMeta("setxattr", path, func(n *node) {
 		if n.xattr == nil {
 			n.xattr = map[string][]byte{}
@@ -633,7 +633,7 @@ func (m *MemFS) SetXattr(ctx context.Context, path, name string, value []byte) e
 }
 
 // ListXattr returns the names of all extended attributes, sorted.
-func (m *MemFS) ListXattr(ctx context.Context, path string) ([]string, error) {
+func (m *FS) ListXattr(ctx context.Context, path string) ([]string, error) {
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -651,7 +651,7 @@ func (m *MemFS) ListXattr(ctx context.Context, path string) ([]string, error) {
 }
 
 // RemoveXattr removes the named extended attribute.
-func (m *MemFS) RemoveXattr(ctx context.Context, path, name string) error {
+func (m *FS) RemoveXattr(ctx context.Context, path, name string) error {
 	p := simplefs.CleanPath(path)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -671,7 +671,7 @@ func (m *MemFS) RemoveXattr(ctx context.Context, path, name string) error {
 
 // StatFS reports the configured capacity (see WithCapacity), with usage
 // derived from the bytes currently stored.
-func (m *MemFS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
+func (m *FS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
 	m.mu.RLock()
 	usedBytes := uint64(m.usedBytes)
 	m.mu.RUnlock()
@@ -697,7 +697,7 @@ func (m *MemFS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
 // direct children, and — when recursive — all descendants. The channel is
 // closed when ctx is cancelled; always cancel the context to release the
 // watcher. Slow receivers drop events instead of blocking the filesystem.
-func (m *MemFS) Watch(ctx context.Context, path string, recursive bool) (<-chan simplefs.Event, error) {
+func (m *FS) Watch(ctx context.Context, path string, recursive bool) (<-chan simplefs.Event, error) {
 	p := simplefs.CleanPath(path)
 
 	m.mu.Lock()
@@ -720,7 +720,7 @@ func (m *MemFS) Watch(ctx context.Context, path string, recursive bool) (<-chan 
 }
 
 type handle struct {
-	m    *MemFS
+	m    *FS
 	n    *node
 	path string
 	opts simplefs.OpenOptions

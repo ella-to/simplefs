@@ -22,7 +22,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// The example is written entirely against the interfaces, not *memfs.MemFS:
+	// The example is written entirely against the interfaces, not *memfs.FS:
 	// swap in any other simplefs.FileProvider and everything below still works.
 	var provider simplefs.FileProvider = memfs.New()
 

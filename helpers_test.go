@@ -62,13 +62,13 @@ func TestExistsMkdirAll(t *testing.T) {
 }
 
 // noRecursive refuses recursive removal, forcing RemoveAll's fallback.
-type noRecursive struct{ *memfs.MemFS }
+type noRecursive struct{ *memfs.FS }
 
 func (n noRecursive) Remove(ctx context.Context, path string, opts simplefs.RemoveOptions) error {
 	if opts.Recursive {
 		return simplefs.ErrNotSupported
 	}
-	return n.MemFS.Remove(ctx, path, opts)
+	return n.FS.Remove(ctx, path, opts)
 }
 
 func TestRemoveAll(t *testing.T) {
