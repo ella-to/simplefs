@@ -22,12 +22,17 @@ package nfs
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"net"
 	"strconv"
 	"sync"
 
 	"ella.to/simplefs"
 )
+
+// ErrServerClosed is returned by ListenAndServe, Serve, and ServePacket after
+// the server has been closed.
+var ErrServerClosed = errors.New("nfs: server closed")
 
 // Options tune a Server. The zero value is ready to use.
 type Options struct {
@@ -36,12 +41,17 @@ type Options struct {
 	// permission surprises on Linux.
 	UID, GID uint32
 
-	// Portmap controls whether ListenAndServe also binds port 111 (both TCP
-	// and UDP) and answers PORTMAP there. Windows' NFS client requires it;
-	// Linux and macOS do not when given explicit port/mountport options.
-	// Binding 111 may fail (privileges, rpcbind already running) — that is
-	// logged nowhere and simply skipped, because it is optional.
+	// Portmap controls whether Start/ListenAndServe also binds port 111
+	// (both TCP and UDP) and answers PORTMAP there. Windows' NFS client
+	// requires it; Linux and macOS do not when given explicit port/mountport
+	// options. If port 111 cannot be bound (privileges, rpcbind already
+	// running) Start fails.
 	Portmap bool
+}
+
+func portmapErr(err error) error {
+	return errors.New("nfs: Options.Portmap: cannot bind port 111 (already used by rpcbind/portmap, " +
+		"or binding low ports needs privileges): " + err.Error())
 }
 
 // Server serves one simplefs.FileProvider as one NFS export ("/").
@@ -62,8 +72,13 @@ type Server struct {
 	port      int
 	listeners []net.Listener
 	packets   []net.PacketConn
+	conns     map[net.Conn]struct{}
 	closed    bool
 	done      chan struct{}
+
+	// wg counts the serving goroutines (accept loops, packet loops, and
+	// connections); Close waits for it so no handler outlives the server.
+	wg sync.WaitGroup
 }
 
 // NewServer wraps p. Serve traffic with ListenAndServe (or Serve/ServeUDP on
@@ -76,6 +91,7 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 		fh:         newFHTable(),
 		files:      newOpenCache(p),
 		createVerf: map[string][8]byte{},
+		conns:      map[net.Conn]struct{}{},
 		done:       make(chan struct{}),
 	}
 	rand.Read(s.writeVerf[:])
@@ -104,15 +120,15 @@ func (s *Server) Addr() net.Addr {
 }
 
 // ListenAndServe binds addr on both TCP and UDP, serves all RPC programs
-// there, and blocks until Close. With opts.Portmap it additionally tries to
-// answer the portmapper on port 111 (best effort). addr is host:port;
-// ":2049" and "127.0.0.1:0" both work.
+// there, and blocks until Close, returning ErrServerClosed. With
+// opts.Portmap it additionally answers the portmapper on port 111. addr is
+// host:port; ":2049" and "127.0.0.1:0" both work.
 func (s *Server) ListenAndServe(addr string) error {
 	if err := s.Start(addr); err != nil {
 		return err
 	}
 	<-s.done
-	return net.ErrClosed
+	return ErrServerClosed
 }
 
 // Start is ListenAndServe without the blocking: it binds addr (TCP and UDP,
@@ -134,36 +150,47 @@ func (s *Server) Start(addr string) error {
 	}
 
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.port == 0 {
+		s.port = port
+	}
+	s.mu.Unlock()
+	if !s.track(nil, pc) {
 		ln.Close()
 		pc.Close()
-		return net.ErrClosed
+		return ErrServerClosed
 	}
-	s.port = port
-	s.listeners = append(s.listeners, ln)
-	s.packets = append(s.packets, pc)
-	s.mu.Unlock()
-
 	go s.servePacket(pc)
 
 	if s.opts.Portmap && port != 111 {
-		if pln, err := net.Listen("tcp", net.JoinHostPort(host, "111")); err == nil {
-			s.track(pln, nil)
-			go s.acceptLoop(pln)
+		pln, err := net.Listen("tcp", net.JoinHostPort(host, "111"))
+		if err != nil {
+			ln.Close()
+			s.Close()
+			return portmapErr(err)
 		}
-		if ppc, err := net.ListenPacket("udp", net.JoinHostPort(host, "111")); err == nil {
-			s.track(nil, ppc)
+		ppc, err := net.ListenPacket("udp", net.JoinHostPort(host, "111"))
+		if err != nil {
+			pln.Close()
+			ln.Close()
+			s.Close()
+			return portmapErr(err)
+		}
+		if s.track(pln, ppc) {
+			go s.acceptLoop(pln)
 			go s.servePacket(ppc)
 		}
 	}
 
+	if !s.track(ln, nil) {
+		ln.Close()
+		return ErrServerClosed
+	}
 	go s.acceptLoop(ln)
 	return nil
 }
 
 // Serve accepts TCP connections on ln and serves all RPC programs. It blocks
-// until ln is closed.
+// until ln is closed, returning ErrServerClosed after Close.
 func (s *Server) Serve(ln net.Listener) error {
 	s.mu.Lock()
 	if s.port == 0 {
@@ -171,43 +198,109 @@ func (s *Server) Serve(ln net.Listener) error {
 			s.port = ta.Port
 		}
 	}
-	s.listeners = append(s.listeners, ln)
 	s.mu.Unlock()
+	if !s.track(ln, nil) {
+		ln.Close()
+		return ErrServerClosed
+	}
 	return s.acceptLoop(ln)
 }
 
-func (s *Server) track(ln net.Listener, pc net.PacketConn) {
+// ServePacket serves RPC datagrams on pc (UDP). It blocks until pc is
+// closed, returning ErrServerClosed after Close.
+func (s *Server) ServePacket(pc net.PacketConn) error {
+	if !s.track(nil, pc) {
+		pc.Close()
+		return ErrServerClosed
+	}
+	return s.servePacket(pc)
+}
+
+// track registers listeners/packet conns for Close and counts one serving
+// goroutine for each. It reports false (registering nothing) once the
+// server is closed.
+func (s *Server) track(ln net.Listener, pc net.PacketConn) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
 	if ln != nil {
 		s.listeners = append(s.listeners, ln)
+		s.wg.Add(1)
 	}
 	if pc != nil {
 		s.packets = append(s.packets, pc)
+		s.wg.Add(1)
 	}
+	return true
+}
+
+// trackConn registers an accepted connection, or reports false when the
+// server is closing.
+func (s *Server) trackConn(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conns[c] = struct{}{}
+	s.wg.Add(1)
+	return true
+}
+
+func (s *Server) untrackConn(c net.Conn) {
+	s.mu.Lock()
+	delete(s.conns, c)
 	s.mu.Unlock()
+	s.wg.Done()
+}
+
+func (s *Server) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 func (s *Server) acceptLoop(ln net.Listener) error {
+	defer s.wg.Done()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if s.isClosed() {
+				return ErrServerClosed
+			}
 			return err
 		}
-		go s.serveConn(conn)
+		if !s.trackConn(conn) {
+			conn.Close()
+			return ErrServerClosed
+		}
+		go func() {
+			defer s.untrackConn(conn)
+			s.serveConn(conn)
+		}()
 	}
 }
 
-// Close stops all listeners and closes every cached provider handle.
+// Close immediately stops all listeners, closes every accepted connection,
+// waits for in-flight handlers to return, and closes every cached provider
+// handle. It is safe to call more than once.
 func (s *Server) Close() error {
 	s.mu.Lock()
-	if !s.closed {
-		close(s.done)
+	if s.closed {
+		s.mu.Unlock()
+		s.wg.Wait()
+		return nil
 	}
 	s.closed = true
+	close(s.done)
 	lns := s.listeners
 	pcs := s.packets
+	conns := s.conns
 	s.listeners = nil
 	s.packets = nil
+	s.conns = map[net.Conn]struct{}{}
 	s.mu.Unlock()
 	for _, ln := range lns {
 		ln.Close()
@@ -215,6 +308,10 @@ func (s *Server) Close() error {
 	for _, pc := range pcs {
 		pc.Close()
 	}
+	for c := range conns {
+		c.Close()
+	}
+	s.wg.Wait()
 	s.files.shutdown()
 	return nil
 }

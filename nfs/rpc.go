@@ -152,7 +152,11 @@ const maxRecord = maxIO + 4096
 // fragments), dispatches each call on its own goroutine, and serializes the
 // replies. NFS clients pipeline requests, so concurrent handling matters.
 func (s *Server) serveConn(conn net.Conn) {
-	defer conn.Close()
+	var reqs sync.WaitGroup
+	defer func() {
+		conn.Close()
+		reqs.Wait()
+	}()
 	var wmu sync.Mutex
 	var hdr [4]byte
 	for {
@@ -175,7 +179,9 @@ func (s *Server) serveConn(conn net.Conn) {
 				break
 			}
 		}
+		reqs.Add(1)
 		go func(msg []byte) {
+			defer reqs.Done()
 			reply := s.dispatch(msg)
 			if reply == nil {
 				return
@@ -192,16 +198,24 @@ func (s *Server) serveConn(conn net.Conn) {
 
 // servePacket handles a UDP socket: one datagram per call, one per reply.
 // Windows' NFS client and rpcbind probes use UDP.
-func (s *Server) servePacket(pc net.PacketConn) {
+func (s *Server) servePacket(pc net.PacketConn) error {
+	defer s.wg.Done()
+	var reqs sync.WaitGroup
+	defer reqs.Wait()
 	buf := make([]byte, 65536)
 	for {
 		n, addr, err := pc.ReadFrom(buf)
 		if err != nil {
-			return
+			if s.isClosed() {
+				return ErrServerClosed
+			}
+			return err
 		}
 		msg := make([]byte, n)
 		copy(msg, buf[:n])
+		reqs.Add(1)
 		go func(msg []byte, addr net.Addr) {
+			defer reqs.Done()
 			if reply := s.dispatch(msg); reply != nil {
 				pc.WriteTo(reply, addr)
 			}

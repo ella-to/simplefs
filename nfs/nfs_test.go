@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -611,5 +613,50 @@ func TestSetattrMtimeOnlyLeavesAtimeZero(t *testing.T) {
 	info, err := rec.Stat(t.Context(), "/f")
 	if err != nil || !info.ModTime.Equal(want) {
 		t.Fatalf("mtime after atime-only setattr = %v (%v), want %v", info.ModTime, err, want)
+	}
+}
+
+func TestCloseStopsConnections(t *testing.T) {
+	before := runtime.NumGoroutine()
+
+	srv := NewServer(memfs.New(), Options{})
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.ListenAndServe("127.0.0.1:0") }()
+
+	var conns []net.Conn
+	for range 4 {
+		conn, err := net.Dial("tcp", srv.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, conn)
+		c := &testClient{t: t, conn: conn}
+		c.mnt()
+	}
+
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-served; !errors.Is(err, ErrServerClosed) {
+		t.Fatalf("ListenAndServe = %v, want ErrServerClosed", err)
+	}
+	// Every accepted connection must have been closed by the server.
+	for _, conn := range conns {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			t.Fatal("connection still open after Close")
+		}
+		conn.Close()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("goroutines: %d after Close, %d before", n, before)
 	}
 }
