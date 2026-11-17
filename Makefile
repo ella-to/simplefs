@@ -1,5 +1,16 @@
-# Build, sign, install, and mount the simplefs File Provider demo (macOS).
+# simplefs build, test, and demo targets.
 #
+# Portable (any OS):
+#   make test       run the Go tests
+#   make race       run the Go tests with the race detector
+#   make vet        go vet ./...
+#   make fmt        fail if any file is not gofmt-clean
+#   make cross      vet every package for every supported GOOS/GOARCH
+#   make bench      run the benchmarks
+#   make check      fmt + vet + race + cross (the full verification gate)
+#   make example    run the in-memory example program (no mount)
+#
+# macOS File Provider demo (Darwin only):
 #   make            build + sign the app bundle
 #   make install    deploy to ~/Applications and register the extension
 #   make mount      add the File Provider domain and expose it at MOUNT_PATH
@@ -7,8 +18,6 @@
 #   make unmount    remove the domain (and the MOUNT_PATH symlink)
 #   make settings   open the pane to enable the domain (macOS 15.2+)
 #   make events     tail create/update/delete events as Go receives them
-#   make test       run the Go tests (pure Go, no mount)
-#   make example    run the in-memory example program (no mount)
 #   make clean      remove build artifacts
 #
 # Linux / Docker (the NFS backend — no FUSE, no privileges to serve):
@@ -19,6 +28,35 @@
 #
 # Code signing identity. Ad-hoc ("-") is the default. Override like:
 #   make IDENTITY="Apple Development: you@example.com (TEAMID)"
+
+.DEFAULT_GOAL := all
+
+.PHONY: test race vet fmt cross bench check example
+
+test:
+	go test ./...
+
+race:
+	go test -race ./...
+
+vet:
+	go vet ./...
+
+fmt:
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
+cross:
+	sh scripts/cross-vet.sh
+
+bench:
+	go test -run '^$$' -bench . -benchmem ./...
+
+check: fmt vet race cross
+
+example:
+	go run ./examples/memfs
+
+ifeq ($(shell uname -s),Darwin)
 
 SDK      := $(shell xcrun --show-sdk-path)
 ARCH     := $(shell uname -m)
@@ -59,15 +97,9 @@ EXT_SRC  := $(EXT_DIR)/SimpleFSItem.m $(EXT_DIR)/SimpleFSEnumerator.m $(EXT_DIR)
 GO_SRC   := $(shell find . -name '*.go' ! -name '*_test.go' ! -path './$(BUILD)/*')
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-.PHONY: all archive bundle sign install mount unmount settings events test example clean
+.PHONY: all archive bundle sign install mount unmount settings events clean
 
 all: sign
-
-test:
-	go test ./...
-
-example:
-	go run ./examples/memfs
 
 # 1. Build the registered provider + capi bridge as a C archive.
 $(ARCHIVE): $(GO_SRC)
@@ -143,6 +175,15 @@ events:
 
 clean:
 	rm -rf $(BUILD)
+
+else
+
+all: test
+
+clean:
+	rm -rf build
+
+endif
 
 # ---- Linux / Docker (NFS backend) ------------------------------------------
 
