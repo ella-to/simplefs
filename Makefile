@@ -63,11 +63,11 @@ ARCH     := $(shell uname -m)
 IDENTITY ?= -
 MINVER   := 11.0
 
-CAPI     := capi
-EXT_DIR  := macos/ext
-APP_DIR  := macos/app
-ARCHIVE_PKG := ./examples/archive
-APP_PKG  := ./examples/mountapp
+CAPI     := fileprovider/capi
+EXT_DIR  := fileprovider/host/ext
+APP_DIR  := fileprovider/host/app
+ARCHIVE_PKG := ./examples/fileprovider/archive
+APP_PKG  := ./examples/fileprovider/app
 
 # Where the mounted folder is exposed (a symlink to the real location macOS
 # picks under ~/Library/CloudStorage). Override: make mount MOUNT_PATH=~/mydir
@@ -111,7 +111,7 @@ $(ARCHIVE): $(GO_SRC)
 archive: $(ARCHIVE)
 
 # 2. Assemble the .app/.appex bundle: the container executable is a Go binary
-#    (examples/mountapp, which drives the mount package), and the extension is
+#    (examples/fileprovider/app, which drives the fileprovider package), and the extension is
 #    the Obj-C host linked with the Go archive against the hand-written
 #    bridge.h.
 bundle: $(ARCHIVE)
@@ -167,7 +167,7 @@ settings:
 	open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
 
 # Tail the create/update/delete events as the Go provider reports them
-# (written by examples/archive via the WatchProvider capability).
+# (written by examples/fileprovider/archive via the WatchProvider capability).
 EVENTLOG := $(HOME)/Library/Containers/$(EXT_ID)/Data/events.log
 events:
 	@touch "$(EVENTLOG)" 2>/dev/null || true

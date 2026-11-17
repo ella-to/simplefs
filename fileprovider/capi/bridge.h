@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-// Per-item permission bits (mirrors mount.Perm). The host maps these to
+// Per-item permission bits (mirrors fileprovider.Perm). The host maps these to
 // NSFileProviderItemCapabilities; an unset bit disables that operation in Finder.
 enum {
     FPPermRead     = 1 << 0, // read content / enumerate folder
@@ -22,7 +22,7 @@ enum {
     FPPermAddItems = 1 << 5, // create children (folders)
 };
 
-// Error classes (mirrors mount.Code). The host maps these to NSError; see
+// Error classes (mirrors fileprovider.Code). The host maps these to NSError; see
 // SimpleFSItem.m for the NSError domain/code each maps to.
 enum {
     FPCodeOK           = 0,

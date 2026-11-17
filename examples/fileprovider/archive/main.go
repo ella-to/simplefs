@@ -1,14 +1,14 @@
-//go:build darwin
+//go:build darwin && cgo
 
 // Command archive is the c-archive entry point for mounting a simplefs provider
-// on macOS. It registers the in-memory provider through mount.Register and
+// on macOS. It registers the in-memory provider through fileprovider.Register and
 // blank-imports the capi bridge so its //export symbols are linked into the
 // static library the Objective-C File Provider extension calls.
 //
 // Build (or just run `make mount` at the repository root, which also builds,
-// signs, and installs the host app bundle from macos/):
+// signs, and installs the host app bundle from fileprovider/host):
 //
-//	CGO_ENABLED=1 go build -buildmode=c-archive -o build/libprovider.a ./examples/archive
+//	CGO_ENABLED=1 go build -buildmode=c-archive -o build/libprovider.a ./examples/fileprovider/archive
 //
 // To mount your own backend, replace memfs.New() with any simplefs.FileProvider.
 package main
@@ -21,16 +21,16 @@ import (
 	"time"
 
 	"ella.to/simplefs"
+	"ella.to/simplefs/fileprovider"
 	"ella.to/simplefs/memfs"
-	"ella.to/simplefs/mount"
 
 	// Linked for its //export C symbols (ProviderListJSON, ProviderCreate, ...).
-	_ "ella.to/simplefs/capi"
+	_ "ella.to/simplefs/fileprovider/capi"
 )
 
 func init() {
 	provider := memfs.New()
-	mount.Register(provider)
+	fileprovider.Register(provider)
 
 	// Demonstrate the WatchProvider capability across a real mount: append
 	// every event to <HostDir>/events.log (the extension's sandbox home), so
@@ -44,7 +44,7 @@ func logEvents(p simplefs.WatchProvider) {
 		return
 	}
 	for ev := range events {
-		dir := mount.HostDir()
+		dir := fileprovider.HostDir()
 		if dir == "" {
 			continue // not running inside the extension yet
 		}

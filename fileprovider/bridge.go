@@ -1,4 +1,4 @@
-package mount
+package fileprovider
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 // Because the core simplefs.FileProvider is fully mutable, every item advertises
 // full permissions; a provider can still refuse individual operations by
 // returning simplefs.ErrPermission (surfaced in Finder as "not permitted"),
-// simplefs.ErrNotSupported, or a *mount.Error for the exact code.
+// simplefs.ErrNotSupported, or an *Error for the exact code.
 //
 // The system addresses items by stable ID while simplefs.FileProvider is
 // path-based, so the bridge keeps an ID<->path table, assigning IDs lazily as
@@ -123,7 +123,7 @@ func (b *Bridge) forget(path string) {
 	}
 }
 
-// wrapErr turns a provider error into a *mount.Error so the right NSError —
+// wrapErr turns a provider error into an *Error so the right NSError —
 // and therefore the right Finder alert — reaches the user.
 func wrapErr(err error) error {
 	if err == nil {

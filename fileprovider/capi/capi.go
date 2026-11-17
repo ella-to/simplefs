@@ -1,21 +1,17 @@
-// Package capi is the CGO bridge between the Objective-C File Provider host
-// (macos/ext) and the Go mount.Bridge. It is the only place that touches C
-// types: it converts C arguments into Go types, calls the registered bridge,
-// and converts the results back. Users never import this package directly;
-// they blank-import it from their c-archive main package so its //export
-// symbols are linked in (see examples/archive).
+// The exported symbols below are documented in bridge.h.
 //
 // Every metadata/mutation call returns a JSON "result envelope" string:
 //
 //	{"ok":true,  "item":{…}}            // a single item
 //	{"ok":true,  "items":[{…},…]}       // a listing
 //	{"ok":true}                          // success with no item (e.g. delete)
-//	{"ok":false, "code":N, "msg":"…"}   // a mount.Error (FPCode* in bridge.h)
+//	{"ok":false, "code":N, "msg":"…"}   // a fileprovider.Error (FPCode* in bridge.h)
 //
 // The Objective-C host turns a non-ok envelope into the matching NSError so
 // the failure can surface in Finder. Each item carries a "perms" bitmask
-// (mount.Perm) the host maps to NSFileProviderItem capabilities, and a
-// "parentID" so the host can model nested folders.
+// (fileprovider.Perm) the host maps to NSFileProviderItem capabilities, and
+// a "parentID" so the host can model nested folders.
+
 package capi
 
 /*
@@ -28,43 +24,43 @@ import (
 	"io"
 	"unsafe"
 
-	"ella.to/simplefs/mount"
+	"ella.to/simplefs/fileprovider"
 )
 
 // resultDTO is the envelope wrapping every metadata/mutation response.
 type resultDTO struct {
-	OK    bool         `json:"ok"`
-	Item  *mount.Item  `json:"item,omitempty"`
-	Items []mount.Item `json:"items,omitempty"`
-	Code  int          `json:"code,omitempty"`
-	Msg   string       `json:"msg,omitempty"`
+	OK    bool                `json:"ok"`
+	Item  *fileprovider.Item  `json:"item,omitempty"`
+	Items []fileprovider.Item `json:"items,omitempty"`
+	Code  int                 `json:"code,omitempty"`
+	Msg   string              `json:"msg,omitempty"`
 }
 
 func marshal(r resultDTO) *C.char {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return C.CString(`{"ok":false,"code":7,"msg":"mount: marshal error"}`)
+		return C.CString(`{"ok":false,"code":7,"msg":"fileprovider: marshal error"}`)
 	}
 	return C.CString(string(b))
 }
 
-func okItem(it mount.Item) *C.char {
+func okItem(it fileprovider.Item) *C.char {
 	return marshal(resultDTO{OK: true, Item: &it})
 }
 
-func okItems(items []mount.Item) *C.char {
+func okItems(items []fileprovider.Item) *C.char {
 	return marshal(resultDTO{OK: true, Items: items})
 }
 
 func okNone() *C.char { return marshal(resultDTO{OK: true}) }
 
 func fail(err error) *C.char {
-	code, msg := mount.CodeOf(err)
+	code, msg := fileprovider.CodeOf(err)
 	return marshal(resultDTO{OK: false, Code: int(code), Msg: msg})
 }
 
 func noProvider() *C.char {
-	return marshal(resultDTO{OK: false, Code: int(mount.CodeIO), Msg: "mount: no provider registered"})
+	return marshal(resultDTO{OK: false, Code: int(fileprovider.CodeIO), Msg: "fileprovider: no provider registered"})
 }
 
 // ProviderRootJSON returns the root container item. The host forces its
@@ -72,7 +68,7 @@ func noProvider() *C.char {
 //
 //export ProviderRootJSON
 func ProviderRootJSON() *C.char {
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
@@ -88,7 +84,7 @@ func ProviderRootJSON() *C.char {
 //
 //export ProviderListJSON
 func ProviderListJSON(cParent *C.char) *C.char {
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
@@ -103,7 +99,7 @@ func ProviderListJSON(cParent *C.char) *C.char {
 //
 //export ProviderItemJSON
 func ProviderItemJSON(cid *C.char) *C.char {
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
@@ -115,7 +111,7 @@ func ProviderItemJSON(cid *C.char) *C.char {
 }
 
 // ProviderContent returns the bytes of a file. The length is written to
-// outLen and the mount.Code to outCode (0 == ok). On failure the return is
+// outLen and the fileprovider.Code to outCode (0 == ok). On failure the return is
 // NULL and, when there is a message, *outErr is a C string the caller frees
 // with ProviderFree. The buffer (on success) is freed with ProviderFree.
 //
@@ -123,11 +119,11 @@ func ProviderItemJSON(cid *C.char) *C.char {
 func ProviderContent(cid *C.char, outLen *C.int, outCode *C.int, outErr **C.char) unsafe.Pointer {
 	*outLen = 0
 	*outErr = nil
-	*outCode = C.int(mount.CodeIO)
+	*outCode = C.int(fileprovider.CodeIO)
 
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
-		*outErr = C.CString("mount: no provider registered")
+		*outErr = C.CString("fileprovider: no provider registered")
 		return nil
 	}
 	rc, err := b.Open(C.GoString(cid))
@@ -141,13 +137,13 @@ func ProviderContent(cid *C.char, outLen *C.int, outCode *C.int, outErr **C.char
 		setErr(outCode, outErr, err)
 		return nil
 	}
-	*outCode = C.int(mount.CodeOK)
+	*outCode = C.int(fileprovider.CodeOK)
 	*outLen = C.int(len(data))
 	return C.CBytes(data)
 }
 
 func setErr(outCode *C.int, outErr **C.char, err error) {
-	code, msg := mount.CodeOf(err)
+	code, msg := fileprovider.CodeOf(err)
 	*outCode = C.int(code)
 	if msg != "" {
 		*outErr = C.CString(msg)
@@ -158,7 +154,7 @@ func setErr(outCode *C.int, outErr **C.char, err error) {
 //
 //export ProviderCreate
 func ProviderCreate(cname, cparent *C.char, cisDir C.int, data unsafe.Pointer, n C.int) *C.char {
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
@@ -178,11 +174,11 @@ func ProviderCreate(cname, cparent *C.char, cisDir C.int, data unsafe.Pointer, n
 //
 //export ProviderUpdate
 func ProviderUpdate(cid, cnewName, cnewParent *C.char, changedContent, changedName, changedParent C.int, data unsafe.Pointer, n C.int) *C.char {
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
-	req := mount.UpdateRequest{ID: C.GoString(cid)}
+	req := fileprovider.UpdateRequest{ID: C.GoString(cid)}
 	if changedName != 0 {
 		req.ChangedName = true
 		req.NewName = C.GoString(cnewName)
@@ -208,7 +204,7 @@ func ProviderUpdate(cid, cnewName, cnewParent *C.char, changedContent, changedNa
 //
 //export ProviderDelete
 func ProviderDelete(cid *C.char) *C.char {
-	b := mount.Current()
+	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
@@ -223,7 +219,7 @@ func ProviderDelete(cid *C.char) *C.char {
 //
 //export ProviderSetHostDir
 func ProviderSetHostDir(cpath *C.char) {
-	mount.SetHostDir(C.GoString(cpath))
+	fileprovider.SetHostDir(C.GoString(cpath))
 }
 
 // ProviderSetDomain records the identifier of the domain this extension
@@ -231,7 +227,7 @@ func ProviderSetHostDir(cpath *C.char) {
 //
 //export ProviderSetDomain
 func ProviderSetDomain(cid *C.char) {
-	mount.SetDomainID(C.GoString(cid))
+	fileprovider.SetDomainID(C.GoString(cid))
 }
 
 // ProviderFree releases a buffer returned by this package.

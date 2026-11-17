@@ -1,8 +1,8 @@
-//go:build darwin
+//go:build darwin && cgo
 
-// Command mountapp is the container app for the File Provider extension: the
-// executable inside SimpleFS.app that manages the mount from Go via the mount
-// package. The OS loads the embedded .appex in a separate process on demand;
+// Command app is the container app for the File Provider extension: the
+// executable inside SimpleFS.app that manages the domain from Go via the
+// fileprovider package. The OS loads the embedded .appex in a separate process on demand;
 // this app does no I/O on the files itself.
 //
 //	SimpleFS                              mount at the default location
@@ -10,17 +10,18 @@
 //	SimpleFS --remove [--path ~/simplefs] unmount (and remove the ~/simplefs symlink)
 //
 // macOS chooses where the domain really lives (~/Library/CloudStorage); with
-// --path the mount package symlinks your path to it, so the folder appears
+// --path the fileprovider package symlinks your path to it, so the folder appears
 // where you asked. It must run from inside the signed bundle (see `make
 // mount`, which passes MOUNT_PATH as --path).
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 
-	"ella.to/simplefs/mount"
+	"ella.to/simplefs/fileprovider"
 )
 
 const (
@@ -32,9 +33,10 @@ func main() {
 	path := flag.String("path", "", "expose the mount at this path (symlinked to the real location)")
 	remove := flag.Bool("remove", false, "unmount instead of mounting")
 	flag.Parse()
+	ctx := context.Background()
 
 	if *remove {
-		if err := mount.UnmountAt(domainID, *path); err != nil {
+		if err := fileprovider.RemoveDomainAt(ctx, domainID, *path); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -42,7 +44,7 @@ func main() {
 		return
 	}
 
-	realPath, err := mount.MountAt(domainID, displayName, *path)
+	realPath, err := fileprovider.AddDomainAt(ctx, domainID, displayName, *path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -49,8 +49,8 @@ var (
 // path the filesystem is reachable at (a directory on Linux, a drive like
 // "Z:\" on Windows).
 func Mount(domainID, displayName string) (string, error) {
-	b := Current()
-	if b == nil {
+	p := Current()
+	if p == nil {
 		return "", ErrUnsupported
 	}
 
@@ -60,7 +60,7 @@ func Mount(domainID, displayName string) (string, error) {
 		return m.target, nil
 	}
 
-	srv := nfs.NewServer(b.Provider(), nfsOptions())
+	srv := nfs.NewServer(p, nfsOptions())
 	if err := srv.Start(nfsListenAddr()); err != nil {
 		return "", fmt.Errorf("mount: start nfs server: %w", err)
 	}

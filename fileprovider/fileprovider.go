@@ -1,30 +1,26 @@
-// Package mount brings an simplefs.FileProvider into the operating system —
-// with no kernel extensions and no FUSE on any platform.
+// Package fileprovider serves a simplefs.FileProvider through a macOS File
+// Provider extension (NSFileProviderReplicatedExtension — the mechanism
+// iCloud Drive and Dropbox use), giving it a Finder sidebar entry, on-demand
+// downloads, and system-managed caching.
 //
-// On Linux and Windows, Mount runs an in-process pure-Go NFSv3 server
-// (ella.to/simplefs/nfs) and attaches it with the kernel's built-in NFS
-// client (mount(2) on Linux, mount.exe on Windows); see mount_nfs.go. To
-// serve without mounting — e.g. from an unprivileged Docker container whose
-// volume is consumed outside — use the nfs package directly.
+// For a plain mount on every OS, including macOS, use package mount instead;
+// File Provider is the opt-in, Finder-integrated alternative and needs a
+// signed app bundle. The moving parts, all owned by this repository:
 //
-// On macOS it backs a File Provider extension (NSFileProviderReplicatedExtension
-// — the mechanism iCloud Drive and Dropbox use).
-// The macOS moving parts, all owned by this repository:
-//
-//   - Bridge / Register (bridge.go, pure Go): adapt the path-based
-//     simplefs.FileProvider onto the ID-based item model the system works with.
-//   - mount/capi (cgo): //export functions the Objective-C extension calls;
-//     linked in by building the registering main package as a c-archive.
-//   - macos/ext, macos/app (Objective-C): the reusable File Provider host —
-//     an .appex that forwards every system request to the capi bridge, and a
-//     container app that adds/removes the domain.
-//   - Mount / Unmount / List / UnmountAll (mount_darwin.go): manage domains
-//     (mount points) from Go by wrapping NSFileProviderManager. Must run from
-//     the signed container app; on non-macOS platforms they return an error.
+//   - Bridge / Register (pure Go): adapt the path-based FileProvider onto the
+//     ID-based item model the system works with.
+//   - capi (cgo): //export functions the Objective-C extension calls; linked
+//     in by building the registering main package as a c-archive.
+//   - host/ext, host/app (Objective-C, plists, entitlements): the reusable
+//     extension that forwards every system request to capi, and the
+//     container app bundle.
+//   - AddDomain / RemoveDomain / Domains (domain_darwin.go): manage domains
+//     (mount points) from Go by wrapping NSFileProviderManager. They must run
+//     from the signed container app; elsewhere they return ErrUnsupported.
 //
 // See the repository Makefile for the build/sign/install pipeline and
-// examples/archive for the c-archive entry point.
-package mount
+// examples/fileprovider for the c-archive entry point and container app.
+package fileprovider
 
 import (
 	"context"
@@ -39,7 +35,7 @@ import (
 const RootID = ""
 
 // Perm is a bitmask of the operations the user may perform on one item. It
-// mirrors the FPPerm* constants in mount/capi/bridge.h; the host maps it onto
+// mirrors the FPPerm* constants in capi/bridge.h; the host maps it onto
 // NSFileProviderItemCapabilities, so a cleared bit greys the operation out in
 // Finder instead of merely rejecting it.
 type Perm uint16
@@ -66,7 +62,7 @@ type Item struct {
 }
 
 // Code classifies an error so the host can map it to the NSError the system
-// understands. It mirrors the FPCode* constants in mount/capi/bridge.h. The
+// understands. It mirrors the FPCode* constants in capi/bridge.h. The
 // quota, not-permitted, name-conflict, and not-found codes surface an alert
 // in Finder; the server code is treated as transient and retried silently.
 type Code int
@@ -85,7 +81,9 @@ const (
 // Error carries a Code and a human-readable message across the extension
 // boundary. The bridge produces them by classifying provider errors (see
 // CodeOf); a provider may also return one directly to pick the exact code —
-// e.g. &mount.Error{Code: mount.CodeQuota, Msg: "file exceeds 10 MB"}.
+// e.g. &fileprovider.Error{Code: fileprovider.CodeQuota, Msg: "file exceeds
+// 10 MB"} — though wrapping a simplefs sentinel (ErrNoSpace, ...) is usually
+// enough.
 type Error struct {
 	Code Code
 	Msg  string
@@ -94,7 +92,7 @@ type Error struct {
 func (e *Error) Error() string { return e.Msg }
 
 // CodeOf classifies err into a (Code, message) pair. A nil error is CodeOK, a
-// *mount.Error passes through, and the simplefs sentinel errors map onto the
+// *Error passes through, and the simplefs sentinel errors map onto the
 // codes whose Finder behavior matches them; anything else is CodeIO.
 func CodeOf(err error) (Code, string) {
 	var me *Error
@@ -121,12 +119,17 @@ func CodeOf(err error) (Code, string) {
 	}
 }
 
-// Domain is a registered mount (a File Provider domain): its identifier and
+// Domain is a File Provider domain (one mounted folder): its identifier and
 // the name shown in Finder's sidebar.
 type Domain struct {
 	ID          string
 	DisplayName string
 }
+
+// ErrUnsupported is returned by the domain-management functions where File
+// Provider is unavailable: on other operating systems, or when built without
+// cgo.
+var ErrUnsupported = errors.New("fileprovider: File Provider domains need macOS and cgo")
 
 var (
 	regMu    sync.RWMutex
@@ -137,8 +140,9 @@ var (
 
 // Register wraps p in a Bridge and installs it as the provider served by the
 // File Provider extension. Call it once from the init function of the
-// c-archive main package, alongside a blank import of ella.to/simplefs/capi
-// so the exported C symbols are linked in (see examples/archive).
+// c-archive main package, alongside a blank import of
+// ella.to/simplefs/fileprovider/capi so the exported C symbols are linked in
+// (see examples/fileprovider/archive).
 func Register(p simplefs.FileProvider) *Bridge {
 	b := NewBridge(p)
 	regMu.Lock()

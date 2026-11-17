@@ -51,13 +51,13 @@ func main() {
 
 	if *mountPath != "" {
 		mount.Register(provider)
-		real, err := mount.MountAt("to.ella.simplefs.nfs", "SimpleFS", *mountPath)
+		real, err := mount.Mount("to.ella.simplefs.nfs", "SimpleFS")
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("mounted at %s (via %s) — Ctrl-C to unmount\n", *mountPath, real)
+		fmt.Printf("mounted at %s — Ctrl-C to unmount\n", real)
 		wait()
-		if err := mount.UnmountAt("to.ella.simplefs.nfs", *mountPath); err != nil {
+		if err := mount.Unmount("to.ella.simplefs.nfs"); err != nil {
 			log.Fatal(err)
 		}
 		return

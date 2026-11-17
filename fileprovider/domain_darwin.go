@@ -1,6 +1,6 @@
-//go:build darwin
+//go:build darwin && cgo
 
-package mount
+package fileprovider
 
 // This file is the host-side (container app) counterpart to the extension-side
 // capi bridge: it manages File Provider domains from Go by wrapping
@@ -10,7 +10,7 @@ package mount
 //
 // It must run from a properly signed app bundle that embeds the File Provider
 // extension and carries the matching App Group entitlement; otherwise macOS
-// rejects addDomain. See the repository Makefile and macos/app.
+// rejects addDomain. See the repository Makefile and host/app.
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc -mmacosx-version-min=11.0
@@ -149,23 +149,26 @@ static int sfs_unmount(const char *cid, char **outErr) {
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"unsafe"
 )
 
-// Mount adds a mount (a File Provider domain) with the given identifier and
+// AddDomain adds a File Provider domain with the given identifier and
 // display name — the name shown in Finder's sidebar — and returns its
 // user-visible root path, which lives under ~/Library/CloudStorage. macOS,
-// not the caller, chooses that location; to expose it elsewhere, symlink to
-// the returned path.
+// not the caller, chooses that location; AddDomainAt symlinks it elsewhere.
 //
-// Mounting a domain that already exists is treated as success and returns its
+// Adding a domain that already exists is treated as success and returns its
 // current path. Newly added third-party domains start DISABLED on macOS
-// 15.2+; Mount still succeeds, but the folder is unusable until the user
+// 15.2+; AddDomain still succeeds, but the folder is unusable until the user
 // enables it once under System Settings > General > Login Items & Extensions
 // > File Providers.
-func Mount(domainID, displayName string) (string, error) {
+func AddDomain(ctx context.Context, domainID, displayName string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if displayName == "" {
 		displayName = domainID
 	}
@@ -181,27 +184,19 @@ func Mount(domainID, displayName string) (string, error) {
 		C.free(unsafe.Pointer(outPath))
 		return path, nil
 	}
-	msg := "unknown error"
-	if outErr != nil {
-		msg = C.GoString(outErr)
-		C.free(unsafe.Pointer(outErr))
-	}
-	return "", fmt.Errorf("mount: add domain %q failed (code %d): %s", domainID, int(code), msg)
+	return "", domainErr("add domain "+domainID, code, outErr)
 }
 
-// List returns every mount owned by this app's extension. Use it to
-// rediscover mounts that outlived the process (e.g. after a restart) so they
-// can be managed or unmounted again.
-func List() ([]Domain, error) {
+// Domains returns every domain owned by this app's extension. Use it to
+// rediscover domains that outlived the process (e.g. after a restart) so
+// they can be managed or removed again.
+func Domains(ctx context.Context) ([]Domain, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var outJSON, outErr *C.char
-	code := C.sfs_list(&outJSON, &outErr)
-	if code != 0 {
-		msg := "unknown error"
-		if outErr != nil {
-			msg = C.GoString(outErr)
-			C.free(unsafe.Pointer(outErr))
-		}
-		return nil, fmt.Errorf("mount: list domains failed (code %d): %s", int(code), msg)
+	if code := C.sfs_list(&outJSON, &outErr); code != 0 {
+		return nil, domainErr("list domains", code, outErr)
 	}
 	var raw []struct {
 		ID   string `json:"id"`
@@ -211,7 +206,7 @@ func List() ([]Domain, error) {
 		s := C.GoString(outJSON)
 		C.free(unsafe.Pointer(outJSON))
 		if err := json.Unmarshal([]byte(s), &raw); err != nil {
-			return nil, fmt.Errorf("mount: parse domains: %w", err)
+			return nil, fmt.Errorf("fileprovider: parse domains: %w", err)
 		}
 	}
 	out := make([]Domain, 0, len(raw))
@@ -221,37 +216,41 @@ func List() ([]Domain, error) {
 	return out, nil
 }
 
-// UnmountAll removes every mount owned by this app's extension, including any
-// orphaned mounts left behind by previous runs.
-func UnmountAll() error {
+// RemoveAllDomains removes every domain owned by this app's extension,
+// including orphans left behind by previous runs.
+func RemoveAllDomains(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var outErr *C.char
-	code := C.sfs_unmount_all(&outErr)
-	if code == 0 {
-		return nil
+	if code := C.sfs_unmount_all(&outErr); code != 0 {
+		return domainErr("remove all domains", code, outErr)
 	}
-	msg := "unknown error"
-	if outErr != nil {
-		msg = C.GoString(outErr)
-		C.free(unsafe.Pointer(outErr))
-	}
-	return fmt.Errorf("mount: remove all domains failed (code %d): %s", int(code), msg)
+	return nil
 }
 
-// Unmount removes the mount with the given identifier. Removing a mount that
-// does not exist is a no-op and returns nil.
-func Unmount(domainID string) error {
+// RemoveDomain removes the domain with the given identifier. Removing a
+// domain that does not exist is a no-op and returns nil.
+func RemoveDomain(ctx context.Context, domainID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cid := C.CString(domainID)
 	defer C.free(unsafe.Pointer(cid))
-
 	var outErr *C.char
-	code := C.sfs_unmount(cid, &outErr)
-	if code == 0 {
-		return nil
+	if code := C.sfs_unmount(cid, &outErr); code != 0 {
+		return domainErr("remove domain "+domainID, code, outErr)
 	}
-	msg := "unknown error"
-	if outErr != nil {
-		msg = C.GoString(outErr)
-		C.free(unsafe.Pointer(outErr))
+	return nil
+}
+
+// domainErr builds the error for a failed NSFileProviderManager call,
+// freeing the C message.
+func domainErr(what string, code C.int, msg *C.char) error {
+	text := "unknown error"
+	if msg != nil {
+		text = C.GoString(msg)
+		C.free(unsafe.Pointer(msg))
 	}
-	return fmt.Errorf("mount: remove domain %q failed (code %d): %s", domainID, int(code), msg)
+	return fmt.Errorf("fileprovider: %s failed (code %d): %s", what, int(code), text)
 }
