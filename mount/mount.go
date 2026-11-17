@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"ella.to/simplefs"
 	"ella.to/simplefs/nfs"
@@ -207,6 +208,9 @@ func mountNFS(ctx context.Context, p simplefs.FileProvider, opts Options) (*Poin
 		nopts.Logger = opts.Logger
 	}
 	nopts.ReadOnly = nopts.ReadOnly || opts.ReadOnly
+	if nopts.AttrCacheTTL == 0 {
+		nopts.AttrCacheTTL = time.Second // matches the client's actimeo=1
+	}
 	addr := nfsPlatform(&nopts)
 
 	srv := nfs.NewServer(p, nopts)

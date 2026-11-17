@@ -152,7 +152,7 @@ func (s *Server) opGetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		w.uint32(stat)
 		return
 	}
-	info, err := s.p.Stat(ctx, path)
+	info, err := s.stat(ctx, path, id)
 	if err != nil {
 		w.uint32(s.errStatus(err))
 		return
@@ -204,7 +204,7 @@ func (s *Server) opLookup(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		}
 		path = simplefs.JoinPath(dir, name)
 	}
-	info, err := s.p.Stat(ctx, path)
+	info, err := s.stat(ctx, path, 0)
 	if err != nil {
 		w.uint32(s.errStatus(err))
 		s.postOpAttr(ctx, w, dir, dirID)
@@ -235,7 +235,7 @@ func (s *Server) opAccess(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		postOpNone(w)
 		return
 	}
-	info, err := s.p.Stat(ctx, path)
+	info, err := s.stat(ctx, path, id)
 	if err != nil {
 		w.uint32(s.errStatus(err))
 		postOpNone(w)
@@ -370,6 +370,7 @@ func (s *Server) opWrite(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	}
 	defer release()
 	n, werr := h.WriteAt(data, int64(offset))
+	s.attrs.drop(id)
 	if werr != nil {
 		w.uint32(s.errStatus(werr))
 		s.wccData(ctx, w, path, id)
@@ -445,8 +446,12 @@ func (s *Server) opCreate(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		s.wccData(ctx, w, dir, dirID)
 		return
 	}
-	h.Close()
+	s.invalidate(dir, path)
 	id := s.fh.ID(path)
+	if info, err := h.Stat(ctx); err == nil {
+		s.attrs.put(id, info) // spares createOK a provider Stat
+	}
+	h.Close()
 	if how == createExclusive {
 		s.rememberCreateVerf(path, verf)
 	} else if attr.setSize && attr.size != 0 {
@@ -490,6 +495,7 @@ func (s *Server) opMkdir(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		s.wccData(ctx, w, dir, dirID)
 		return
 	}
+	s.invalidate(dir)
 	s.createOK(ctx, w, path, dir, dirID)
 }
 
@@ -518,6 +524,7 @@ func (s *Server) opSymlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		s.wccData(ctx, w, dir, dirID)
 		return
 	}
+	s.invalidate(dir)
 	s.createOK(ctx, w, path, dir, dirID)
 }
 
@@ -533,7 +540,7 @@ func (s *Server) opRemove(ctx context.Context, r *xdrReader, w *xdrWriter, wantD
 		return
 	}
 	path := simplefs.JoinPath(dir, name)
-	if info, err := s.p.Stat(ctx, path); err == nil {
+	if info, err := s.stat(ctx, path, 0); err == nil {
 		if wantDir && !info.IsDir() {
 			w.uint32(nfsErrNotDir)
 			s.wccData(ctx, w, dir, dirID)
@@ -551,6 +558,7 @@ func (s *Server) opRemove(ctx context.Context, r *xdrReader, w *xdrWriter, wantD
 		s.wccData(ctx, w, dir, dirID)
 		return
 	}
+	s.invalidate(dir, path)
 	if id, ok := s.fh.Lookup(path); ok {
 		s.files.drop(id)
 	}
@@ -590,6 +598,7 @@ func (s *Server) opRename(ctx context.Context, r *xdrReader, w *xdrWriter) {
 			s.wccData(ctx, w, toDir, toDirID)
 			return
 		}
+		s.invalidate(fromDir, toDir, oldPath, newPath)
 		if id, ok := s.fh.Lookup(newPath); ok {
 			s.files.drop(id) // the file that was overwritten
 		}
@@ -632,6 +641,7 @@ func (s *Server) opLink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		s.wccData(ctx, w, dir, dirID)
 		return
 	}
+	s.invalidate(path, dir)
 	w.uint32(nfsOK)
 	s.postOpAttr(ctx, w, path, id)
 	s.wccData(ctx, w, dir, dirID)
@@ -662,6 +672,7 @@ func (s *Server) listDir(ctx context.Context, dir string, dirID uint64) ([]dirEn
 			info := *e.Info
 			info.Path = childPath
 			de.info = &info
+			s.attrs.put(de.id, info)
 		}
 		entries = append(entries, de)
 	}
@@ -724,7 +735,7 @@ func (s *Server) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus
 		if plus {
 			info := e.info
 			if info == nil {
-				if fi, err := s.p.Stat(ctx, e.path); err == nil {
+				if fi, err := s.stat(ctx, e.path, e.id); err == nil {
 					info = &fi
 				}
 			}
@@ -842,6 +853,7 @@ func (s *Server) opCommit(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		return
 	}
 	err = h.Sync(ctx)
+	s.attrs.drop(id)
 	release()
 	if err != nil {
 		w.uint32(s.errStatus(err))

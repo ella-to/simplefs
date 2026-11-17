@@ -29,7 +29,9 @@ type testClient struct {
 
 func startServer(t *testing.T) (*Server, *testClient) {
 	t.Helper()
-	return startServerWith(t, memfs.New(), Options{})
+	// The attribute cache is on, as package mount runs it, so every protocol
+	// test also checks that the server invalidates it correctly.
+	return startServerWith(t, memfs.New(), Options{AttrCacheTTL: time.Second})
 }
 
 // startServerWith serves p with opts on a loopback listener and dials it.

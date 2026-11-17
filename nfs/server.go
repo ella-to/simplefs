@@ -69,6 +69,12 @@ type Options struct {
 	// it reaches the provider, and makes ACCESS deny write rights.
 	ReadOnly bool
 
+	// AttrCacheTTL enables a server-side attribute cache: Stat results are
+	// reused for this long, invalidated by every change made through the
+	// server and by WatchProvider events. It mainly helps providers with
+	// slow Stat (remote backends). Zero disables it.
+	AttrCacheTTL time.Duration
+
 	// Timeout bounds each RPC's provider calls; a call that runs out of time
 	// reaches the client as NFS3ERR_JUKEBOX ("try again later"). Zero means
 	// no limit.
@@ -98,6 +104,7 @@ type Server struct {
 
 	fh    *idtable.Table[uint64]
 	files *openCache
+	attrs *attrCache
 
 	// fsReadOnly caches FSInfo.ReadOnly from the most recent StatFS call
 	// (clients issue FSSTAT/FSINFO at mount time and periodically).
@@ -142,12 +149,16 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 		log:        log,
 		fh:         newFHTable(),
 		files:      newOpenCache(p, opts.HandleIdle),
+		attrs:      newAttrCache(opts.AttrCacheTTL),
 		createVerf: map[string][8]byte{},
 		conns:      map[net.Conn]struct{}{},
 		done:       make(chan struct{}),
 	}
 	rand.Read(s.writeVerf[:])
 	rand.Read(s.bootID[:])
+	if opts.AttrCacheTTL > 0 {
+		go s.watchInvalidate()
+	}
 	return s
 }
 

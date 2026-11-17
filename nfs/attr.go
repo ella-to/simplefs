@@ -157,7 +157,7 @@ const fsid = 0x53465331
 // postOpAttr encodes a post_op_attr: stat the path and attach attributes if
 // that works, else "attributes_follow = false".
 func (s *Server) postOpAttr(ctx context.Context, w *xdrWriter, path string, id uint64) {
-	info, err := s.p.Stat(ctx, path)
+	info, err := s.stat(ctx, path, id)
 	if err != nil {
 		w.bool(false)
 		return
@@ -245,6 +245,7 @@ func readSattr3(r *xdrReader) sattr3 {
 // ownership, and times. Attributes reported back still use Options.UID/GID
 // (the provider model has no owner field).
 func (s *Server) applySattr(ctx context.Context, path string, id uint64, a sattr3) error {
+	defer s.attrs.drop(id)
 	if a.setSize {
 		h, release, err := s.files.acquire(ctx, id, path, true)
 		if err != nil {

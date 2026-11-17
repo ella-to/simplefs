@@ -75,7 +75,7 @@ var benchProviders = []struct {
 func benchServer(b *testing.B, delay time.Duration) (*countingFS, *testClient, []byte) {
 	b.Helper()
 	fs := &countingFS{FS: memfs.New(memfs.WithCapacity(4 << 30)), delay: delay}
-	_, c := startServerWith(b, fs, Options{})
+	_, c := startServerWith(b, fs, Options{AttrCacheTTL: time.Second})
 	return fs, c, c.mnt()
 }
 
