@@ -1,0 +1,2 @@
+# the demo's default database (plus its WAL and shared-memory files)
+data.db*
