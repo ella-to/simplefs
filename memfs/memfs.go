@@ -12,10 +12,12 @@ import (
 	"context"
 	"errors"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ella.to/simplefs"
@@ -39,6 +41,39 @@ type node struct {
 	data     []byte           // TypeFile
 	children map[string]*node // TypeDir
 	target   string           // TypeSymlink
+
+	// sorted caches the children's names in order, so paged ReadDir costs
+	// O(limit) instead of a sort per page. It is built lazily by readers
+	// (possibly concurrently, hence atomic) and reset by every mutation of
+	// children, which happens under the write lock.
+	sorted atomic.Pointer[[]string]
+}
+
+// setChild adds or replaces the entry name. Callers must hold the write lock.
+func (n *node) setChild(name string, c *node) {
+	n.children[name] = c
+	n.sorted.Store(nil)
+}
+
+// delChild removes the entry name. Callers must hold the write lock.
+func (n *node) delChild(name string) {
+	delete(n.children, name)
+	n.sorted.Store(nil)
+}
+
+// sortedNames returns the children's names in order. Callers must hold at
+// least the read lock and must not modify the result.
+func (n *node) sortedNames() []string {
+	if names := n.sorted.Load(); names != nil {
+		return *names
+	}
+	names := make([]string, 0, len(n.children))
+	for name := range n.children {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	n.sorted.Store(&names)
+	return names
 }
 
 func (n *node) bump() { n.version++ }
@@ -318,7 +353,7 @@ func (m *FS) createFileLocked(p string, mode simplefs.FileMode) (*node, error) {
 		return nil, err
 	}
 	n := &node{typ: simplefs.TypeFile, mode: mode, modTime: time.Now(), version: 1, nlink: 1}
-	parent.children[name] = n
+	parent.setChild(name, n)
 	parent.modTime = n.modTime
 	parent.bump()
 	m.event(simplefs.EventCreate, p, "", n)
@@ -340,15 +375,10 @@ func (m *FS) ReadDir(ctx context.Context, path string, page simplefs.Page) (simp
 		return simplefs.DirPage{}, patherr("readdir", p, simplefs.ErrNotDir)
 	}
 
-	names := make([]string, 0, len(n.children))
-	for name := range n.children {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
+	names := n.sortedNames()
 	if page.Token != "" {
-		idx := sort.SearchStrings(names, page.Token)
-		if idx < len(names) && names[idx] == page.Token {
+		idx, found := slices.BinarySearch(names, page.Token)
+		if found {
 			idx++
 		}
 		names = names[idx:]
@@ -396,7 +426,7 @@ func (m *FS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptions)
 		version:  1,
 		nlink:    1,
 	}
-	parent.children[name] = n
+	parent.setChild(name, n)
 	parent.modTime = n.modTime
 	parent.bump()
 	m.event(simplefs.EventCreate, p, "", n)
@@ -431,7 +461,7 @@ func (m *FS) Remove(ctx context.Context, path string, opts simplefs.RemoveOption
 	if n.typ.IsDir() && len(n.children) > 0 && !opts.Recursive {
 		return patherr("remove", p, simplefs.ErrNotEmpty)
 	}
-	delete(parent.children, name)
+	parent.delChild(name)
 	m.unlinkLocked(n)
 	parent.modTime = time.Now()
 	parent.bump()
@@ -484,8 +514,8 @@ func (m *FS) Rename(ctx context.Context, oldPath, newPath string, opts simplefs.
 		}
 	}
 
-	delete(srcParent.children, srcName)
-	dstParent.children[dstName] = src
+	srcParent.delChild(srcName)
+	dstParent.setChild(dstName, src)
 	if replacing {
 		m.unlinkLocked(dst)
 	}
@@ -533,7 +563,7 @@ func (m *FS) Symlink(ctx context.Context, target, linkPath string) error {
 		return patherr("symlink", p, simplefs.ErrExist)
 	}
 	n := &node{typ: simplefs.TypeSymlink, mode: 0o777, modTime: time.Now(), target: target, version: 1, nlink: 1}
-	parent.children[name] = n
+	parent.setChild(name, n)
 	parent.modTime = n.modTime
 	parent.bump()
 	m.event(simplefs.EventCreate, p, "", n)
@@ -561,7 +591,7 @@ func (m *FS) Link(ctx context.Context, existingPath, newPath string) error {
 	if _, ok := parent.children[name]; ok {
 		return patherr("link", np, simplefs.ErrExist)
 	}
-	parent.children[name] = n
+	parent.setChild(name, n)
 	m.linkLocked(n)
 	parent.modTime = time.Now()
 	parent.bump()
@@ -642,12 +672,7 @@ func (m *FS) ListXattr(ctx context.Context, path string) ([]string, error) {
 	if err != nil {
 		return nil, patherr("listxattr", p, err)
 	}
-	names := make([]string, 0, len(n.xattr))
-	for name := range n.xattr {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
+	return slices.Sorted(maps.Keys(n.xattr)), nil
 }
 
 // RemoveXattr removes the named extended attribute.
@@ -727,9 +752,32 @@ type handle struct {
 
 	mu     sync.Mutex
 	closed bool
+	dirty  bool // modified since the last modify event
 }
 
 var _ simplefs.FileHandle = (*handle)(nil)
+
+// flushEvent emits one modify event for all writes since the last flush.
+// Coalescing keeps a large copy from flooding watchers with an event (and a
+// FileInfo allocation) per WriteAt.
+func (h *handle) flushEvent() {
+	h.mu.Lock()
+	dirty := h.dirty
+	h.dirty = false
+	h.mu.Unlock()
+	if !dirty {
+		return
+	}
+	h.m.mu.RLock()
+	h.m.event(simplefs.EventModify, h.path, "", h.n)
+	h.m.mu.RUnlock()
+}
+
+func (h *handle) markDirty() {
+	h.mu.Lock()
+	h.dirty = true
+	h.mu.Unlock()
+}
 
 func (h *handle) check(write bool) error {
 	h.mu.Lock()
@@ -790,7 +838,7 @@ func (h *handle) WriteAt(p []byte, off int64) (int, error) {
 	copy(h.n.data[off:], p)
 	h.n.modTime = time.Now()
 	h.n.bump()
-	h.m.event(simplefs.EventModify, h.path, "", h.n)
+	h.markDirty()
 	return len(p), nil
 }
 
@@ -802,7 +850,11 @@ func (h *handle) Stat(ctx context.Context) (simplefs.FileInfo, error) {
 	return h.n.info(h.path), nil
 }
 
-func (h *handle) Sync(ctx context.Context) error { return nil }
+// Sync emits the modify event for writes since the last Sync or Close.
+func (h *handle) Sync(ctx context.Context) error {
+	h.flushEvent()
+	return nil
+}
 
 func (h *handle) Truncate(ctx context.Context, size int64) error {
 	if err := h.check(true); err != nil {
@@ -823,7 +875,7 @@ func (h *handle) Truncate(ctx context.Context, size int64) error {
 	h.m.setDataLocked(h.n, resize(h.n.data, size))
 	h.n.modTime = time.Now()
 	h.n.bump()
-	h.m.event(simplefs.EventModify, h.path, "", h.n)
+	h.markDirty()
 	return nil
 }
 
@@ -854,8 +906,13 @@ func (h *handle) Close() error {
 		return patherr("close", h.path, simplefs.ErrClosed)
 	}
 	h.closed = true
+	dirty := h.dirty
+	h.dirty = false
 	h.m.mu.Lock()
 	delete(h.m.handles, h)
+	if dirty {
+		h.m.event(simplefs.EventModify, h.path, "", h.n)
+	}
 	h.m.mu.Unlock()
 	return nil
 }

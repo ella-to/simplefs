@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"strings"
 	"testing"
 	"time"
 
@@ -477,5 +478,55 @@ func TestErrorsMatchIOFS(t *testing.T) {
 	var pe *fs.PathError
 	if !errors.As(err, &pe) || pe.Path != "/missing" {
 		t.Fatalf("error %v is not an *fs.PathError for /missing", err)
+	}
+}
+
+func TestModifyEventsCoalesce(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	m := New()
+	h, _ := simplefs.Create(ctx, m, "/f", 0)
+	events, _ := m.Watch(ctx, "/", true)
+	for i := range 100 {
+		h.WriteAt([]byte{byte(i)}, int64(i))
+	}
+	h.Sync(ctx)
+	h.WriteAt([]byte("x"), 0)
+	h.Close()
+
+	var modifies int
+	timeout := time.After(200 * time.Millisecond)
+	for done := false; !done; {
+		select {
+		case ev := <-events:
+			if ev.Type == simplefs.EventModify {
+				modifies++
+			}
+		case <-timeout:
+			done = true
+		}
+	}
+	if modifies != 2 {
+		t.Fatalf("got %d modify events, want 2 (one per Sync/Close)", modifies)
+	}
+}
+
+func TestReadDirCacheInvalidation(t *testing.T) {
+	ctx := t.Context()
+	m := New()
+	writeFile(t, m, "/b", "")
+	page, _ := m.ReadDir(ctx, "/", simplefs.Page{})
+	if len(page.Entries) != 1 {
+		t.Fatalf("entries = %d", len(page.Entries))
+	}
+	writeFile(t, m, "/a", "")
+	m.Rename(ctx, "/b", "/c", simplefs.RenameOptions{})
+	page, _ = m.ReadDir(ctx, "/", simplefs.Page{})
+	var names []string
+	for _, e := range page.Entries {
+		names = append(names, e.Name)
+	}
+	if strings.Join(names, ",") != "a,c" {
+		t.Fatalf("names = %v, want [a c]", names)
 	}
 }
