@@ -21,7 +21,7 @@ func (s *Server) mountProc(c *rpcCall) []byte {
 	case mountProcMnt:
 		c.args.string() // dirpath — single export, always the root
 		w.uint32(0)     // MNT3_OK
-		w.opaque(encodeFH(rootFileID))
+		w.opaque(s.encodeFH(rootFileID))
 		w.uint32(2) // two acceptable auth flavors:
 		w.uint32(authUnix)
 		w.uint32(authNone)

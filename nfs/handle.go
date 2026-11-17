@@ -2,9 +2,10 @@ package nfs
 
 // NFSv3 addresses files by opaque filehandle while simplefs.FileProvider is
 // path-based, so the server keeps an ID<->path table (internal/idtable, as
-// fileprovider.Bridge does), re-keying on rename and forgetting on remove. The 8-byte ID
-// doubles as the fileid3 attribute, so it must stay stable for the life of a
-// file. The table lives in memory: handles held by a client across a server
+// fileprovider.Bridge does), re-keying on rename and forgetting on remove.
+// The 8-byte ID doubles as the fileid3 attribute, so it must stay stable for
+// the life of a file. The table lives in memory and every handle carries the
+// server's random boot verifier: handles held by a client across a server
 // restart come back NFS3ERR_STALE, which is the protocol's word for exactly
 // that.
 
@@ -27,19 +28,31 @@ func newFHTable() *idtable.Table[uint64] {
 	return idtable.New(uint64(rootFileID), func() uint64 { next++; return next })
 }
 
-// encodeFH renders an ID as the wire filehandle (opaque, 8 bytes).
-func encodeFH(id uint64) []byte {
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], id)
+// fhLen is the wire size of a filehandle: the 8-byte ID followed by the
+// server's 8-byte boot verifier.
+const fhLen = 16
+
+// encodeFH renders an ID as the wire filehandle (opaque, 16 bytes). The boot
+// verifier is random per Server, so handles from an earlier process — whose
+// IDs may now name different files — are detected as stale instead of
+// silently resolving to the wrong file.
+func (s *Server) encodeFH(id uint64) []byte {
+	var b [fhLen]byte
+	binary.BigEndian.PutUint64(b[:8], id)
+	copy(b[8:], s.bootID[:])
 	return b[:]
 }
 
-// decodeFH parses a wire filehandle produced by encodeFH.
-func decodeFH(b []byte) (uint64, bool) {
-	if len(b) != 8 {
-		return 0, false
+// decodeFH parses a wire filehandle. ok is false for malformed handles;
+// stale is true for well-formed handles issued by another server instance.
+func (s *Server) decodeFH(b []byte) (id uint64, stale, ok bool) {
+	if len(b) != fhLen {
+		return 0, false, false
 	}
-	return binary.BigEndian.Uint64(b), true
+	if [8]byte(b[8:]) != s.bootID {
+		return 0, true, true
+	}
+	return binary.BigEndian.Uint64(b[:8]), false, true
 }
 
 // openCache keeps provider FileHandles alive across the many independent

@@ -189,9 +189,9 @@ func wccNone(w *xdrWriter) {
 }
 
 // postOpFH encodes a post_op_fh3 carrying the handle for id.
-func postOpFH(w *xdrWriter, id uint64) {
+func (s *Server) postOpFH(w *xdrWriter, id uint64) {
 	w.bool(true)
-	w.opaque(encodeFH(id))
+	w.opaque(s.encodeFH(id))
 }
 
 // sattr3 carries the settable attributes of a SETATTR/CREATE/MKDIR call.

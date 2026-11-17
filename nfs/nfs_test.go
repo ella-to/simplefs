@@ -223,7 +223,7 @@ func (c *testClient) read(fh []byte, offset uint64, count uint32) ([]byte, bool)
 func TestMountAndRoot(t *testing.T) {
 	_, c := startServer(t)
 	rootFH := c.mnt()
-	if len(rootFH) != 8 {
+	if len(rootFH) != fhLen {
 		t.Fatalf("root fh length = %d", len(rootFH))
 	}
 
@@ -806,4 +806,22 @@ func TestAllowedClients(t *testing.T) {
 	if _, err := c.conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("connection from a disallowed client stayed open")
 	}
+}
+
+func TestHandleFromAnotherServerIsStale(t *testing.T) {
+	p := memfs.New()
+	simplefs.WriteFile(t.Context(), p, "/f", []byte("x"), 0)
+	_, a := startServerWith(t, p, Options{})
+	fh := a.lookup(a.mnt(), "f", nfsOK)
+
+	// Same provider, new server process: the old handle must be stale.
+	_, b := startServerWith(t, p, Options{})
+	b.mnt()
+	args := newWriter()
+	args.opaque(fh)
+	b.nfsCall(nfsProcGetattr, args, nfsErrStale)
+
+	args = newWriter()
+	args.opaque(fh[:8])
+	b.nfsCall(nfsProcGetattr, args, nfsErrBadHandle)
 }

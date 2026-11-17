@@ -46,9 +46,12 @@ func (s *Server) fhPath(r *xdrReader) (path string, id uint64, stat uint32) {
 	if r.err != nil {
 		return "", 0, nfsErrBadHandle
 	}
-	id, ok := decodeFH(fh)
+	id, stale, ok := s.decodeFH(fh)
 	if !ok {
 		return "", 0, nfsErrBadHandle
+	}
+	if stale {
+		return "", 0, nfsErrStale
 	}
 	path, ok = s.fh.Path(id)
 	if !ok {
@@ -207,7 +210,7 @@ func (s *Server) opLookup(r *xdrReader, w *xdrWriter) {
 	}
 	id := s.fh.ID(path)
 	w.uint32(nfsOK)
-	w.opaque(encodeFH(id))
+	w.opaque(s.encodeFH(id))
 	s.postOpAttrInfo(w, info, id)
 	s.postOpAttr(w, dir, dirID)
 }
@@ -458,7 +461,7 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 func (s *Server) createOK(w *xdrWriter, path, dir string, dirID uint64) {
 	id := s.fh.ID(path)
 	w.uint32(nfsOK)
-	postOpFH(w, id)
+	s.postOpFH(w, id)
 	s.postOpAttr(w, path, id)
 	s.wccData(w, dir, dirID)
 }
@@ -728,7 +731,7 @@ func (s *Server) opReaddir(r *xdrReader, w *xdrWriter, plus bool) {
 			} else {
 				postOpNone(w)
 			}
-			postOpFH(w, e.id)
+			s.postOpFH(w, e.id)
 		}
 	}
 	w.bool(false) // no more entries in this reply

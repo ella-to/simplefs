@@ -27,8 +27,8 @@ func rpcMsg(prog, vers, proc uint32, args *xdrWriter) []byte {
 
 // fuzzSeeds returns one well-formed call for every procedure the server
 // implements, so the fuzzer starts from inputs that reach deep code paths.
-func fuzzSeeds() [][]byte {
-	root := encodeFH(rootFileID)
+func fuzzSeeds(srv *Server) [][]byte {
+	root := srv.encodeFH(rootFileID)
 	fhArgs := func() *xdrWriter { w := newWriter(); w.opaque(root); return w }
 	dirop := func(name string) *xdrWriter { w := fhArgs(); w.string(name); return w }
 	sattr := func(w *xdrWriter) *xdrWriter {
@@ -126,7 +126,7 @@ func fuzzSeeds() [][]byte {
 }
 
 func FuzzDecodeCall(f *testing.F) {
-	for _, s := range fuzzSeeds() {
+	for _, s := range fuzzSeeds(NewServer(memfs.New(), Options{})) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, msg []byte) {
@@ -138,10 +138,12 @@ func FuzzDecodeCall(f *testing.F) {
 }
 
 func FuzzDispatch(f *testing.F) {
-	for _, s := range fuzzSeeds() {
+	srv := NewServer(memfs.New(memfs.WithCapacity(1<<20)), Options{})
+	// A fixed boot verifier keeps the corpus' handles valid across runs.
+	srv.bootID = [8]byte{}
+	for _, s := range fuzzSeeds(srv) {
 		f.Add(s)
 	}
-	srv := NewServer(memfs.New(memfs.WithCapacity(1<<20)), Options{})
 	f.Cleanup(func() { srv.Close() })
 	f.Fuzz(func(t *testing.T, msg []byte) {
 		srv.dispatch(msg) // must never panic, whatever the bytes

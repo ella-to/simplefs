@@ -94,6 +94,7 @@ type Server struct {
 	fsReadOnly atomic.Bool
 
 	writeVerf [8]byte
+	bootID    [8]byte // random per Server; part of every filehandle
 
 	verfMu     sync.Mutex
 	createVerf map[string][8]byte // path -> exclusive-create verifier
@@ -134,6 +135,7 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 		done:       make(chan struct{}),
 	}
 	rand.Read(s.writeVerf[:])
+	rand.Read(s.bootID[:])
 	return s
 }
 
