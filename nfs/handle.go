@@ -28,31 +28,35 @@ func newFHTable() *idtable.Table[uint64] {
 	return idtable.New(uint64(rootFileID), func() uint64 { next++; return next })
 }
 
-// fhLen is the wire size of a filehandle: the 8-byte ID followed by the
-// server's 8-byte boot verifier.
-const fhLen = 16
+// fhLen is the wire size of a filehandle: the 8-byte ID, the server's
+// 8-byte boot verifier, and the 4-byte export index.
+const fhLen = 20
 
-// encodeFH renders an ID as the wire filehandle (opaque, 16 bytes). The boot
-// verifier is random per Server, so handles from an earlier process — whose
-// IDs may now name different files — are detected as stale instead of
-// silently resolving to the wrong file.
-func (s *Server) encodeFH(id uint64) []byte {
+// encodeFH renders an ID as the wire filehandle. The boot verifier is
+// random per Server, so handles from an earlier process — whose IDs may now
+// name different files — are detected as stale instead of silently
+// resolving to the wrong file.
+func (s *export) encodeFH(id uint64) []byte {
 	var b [fhLen]byte
 	binary.BigEndian.PutUint64(b[:8], id)
-	copy(b[8:], s.bootID[:])
+	copy(b[8:16], s.bootID[:])
+	binary.BigEndian.PutUint32(b[16:], s.index)
 	return b[:]
 }
 
-// decodeFH parses a wire filehandle. ok is false for malformed handles;
-// stale is true for well-formed handles issued by another server instance.
-func (s *Server) decodeFH(b []byte) (id uint64, stale, ok bool) {
-	if len(b) != fhLen {
-		return 0, false, false
+// decodeFH parses a wire filehandle of this export. stat is NFS3ERR_BADHANDLE
+// for malformed handles, NFS3ERR_STALE for handles of another server
+// instance, and NFS3ERR_XDEV for handles of another export.
+func (s *export) decodeFH(b []byte) (id uint64, stat uint32) {
+	switch {
+	case len(b) != fhLen:
+		return 0, nfsErrBadHandle
+	case [8]byte(b[8:16]) != s.bootID:
+		return 0, nfsErrStale
+	case binary.BigEndian.Uint32(b[16:]) != s.index:
+		return 0, nfsErrXDev
 	}
-	if [8]byte(b[8:]) != s.bootID {
-		return 0, true, true
-	}
-	return binary.BigEndian.Uint64(b[:8]), false, true
+	return binary.BigEndian.Uint64(b[:8]), nfsOK
 }
 
 // openCache keeps provider FileHandles alive across the many independent

@@ -93,7 +93,7 @@ func (c *dirCache) drop(dir uint64) {
 // fresh listing at the same index — the best a stateless protocol can do —
 // while one carrying a different verifier than the live snapshot gets
 // NFS3ERR_BAD_COOKIE so the client restarts.
-func (s *Server) snapshot(ctx context.Context, dir string, dirID, cookie uint64, verf [8]byte) (*dirSnap, uint32) {
+func (s *export) snapshot(ctx context.Context, dir string, dirID, cookie uint64, verf [8]byte) (*dirSnap, uint32) {
 	if cookie != 0 {
 		if sn, ok := s.dirs.get(dirID, verf); ok {
 			return sn, nfsOK

@@ -224,8 +224,8 @@ func BenchmarkDispatch(b *testing.B) {
 	simplefs.WriteFile(b.Context(), p, "/f", make([]byte, 64<<20), 0)
 	srv := NewServer(p, Options{AttrCacheTTL: time.Second})
 	defer srv.Close()
-	id := srv.fh.ID("/f")
-	fh := srv.encodeFH(id)
+	id := srv.root().fh.ID("/f")
+	fh := srv.root().encodeFH(id)
 
 	read := newWriter()
 	read.opaque(fh)

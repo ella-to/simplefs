@@ -671,16 +671,16 @@ func TestCreateVerfBounded(t *testing.T) {
 	defer srv.Close()
 	var v [8]byte
 	for i := range maxCreateVerfs * 3 {
-		srv.rememberCreateVerf("/f"+strconv.Itoa(i), v)
+		srv.root().rememberCreateVerf("/f"+strconv.Itoa(i), v)
 	}
-	if n := len(srv.createVerf); n > maxCreateVerfs {
+	if n := len(srv.root().createVerf); n > maxCreateVerfs {
 		t.Fatalf("createVerf holds %d entries, cap %d", n, maxCreateVerfs)
 	}
-	if len(srv.verfOrder) > 2*maxCreateVerfs {
-		t.Fatalf("verfOrder not compacted: %d", len(srv.verfOrder))
+	if len(srv.root().verfOrder) > 2*maxCreateVerfs {
+		t.Fatalf("verfOrder not compacted: %d", len(srv.root().verfOrder))
 	}
-	srv.renameCreateVerf("/f"+strconv.Itoa(maxCreateVerfs*3-1), "/moved")
-	if !srv.sameCreateVerf("/moved", v) {
+	srv.root().renameCreateVerf("/f"+strconv.Itoa(maxCreateVerfs*3-1), "/moved")
+	if !srv.root().sameCreateVerf("/moved", v) {
 		t.Fatal("verifier did not follow rename")
 	}
 }
@@ -942,7 +942,7 @@ func TestRetransmittedRemoveIsAnsweredFromCache(t *testing.T) {
 	simplefs.WriteFile(t.Context(), p, "/f", nil, 0)
 	srv := NewServer(p, Options{})
 	defer srv.Close()
-	root := srv.encodeFH(rootFileID)
+	root := srv.root().encodeFH(rootFileID)
 
 	args := newWriter()
 	args.opaque(root)
@@ -1015,4 +1015,75 @@ func TestHardLinkSharesFileID(t *testing.T) {
 	if id1 != id2 || n1 != 2 || n2 != 2 {
 		t.Fatalf("a: nlink %d fileid %d; b: nlink %d fileid %d; want shared fileid, nlink 2", n1, id1, n2, id2)
 	}
+}
+
+func (c *testClient) mntPath(path string, want uint32) []byte {
+	c.t.Helper()
+	args := newWriter()
+	args.string(path)
+	r := c.call(progMount, 3, mountProcMnt, args)
+	if st := r.uint32(); st != want {
+		c.t.Fatalf("MNT %s status = %d, want %d", path, st, want)
+	}
+	if want != 0 {
+		return nil
+	}
+	return r.opaque()
+}
+
+func TestMultipleExports(t *testing.T) {
+	a, b := memfs.New(), memfs.New()
+	simplefs.WriteFile(t.Context(), a, "/in-a", nil, 0)
+	simplefs.WriteFile(t.Context(), b, "/in-b", nil, 0)
+	srv, c := startServerWith(t, a, Options{})
+	if err := srv.Export("second", b); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Export("second", b); !errors.Is(err, simplefs.ErrExist) {
+		t.Fatalf("duplicate Export = %v", err)
+	}
+
+	rootA := c.mntPath("/", 0)
+	rootB := c.mntPath("/second", 0)
+	c.mntPath("/nope", mnt3ErrNoEnt)
+	c.lookup(rootA, "in-a", nfsOK)
+	c.lookup(rootA, "in-b", nfsErrNoEnt)
+	c.lookup(rootB, "in-b", nfsOK)
+	c.lookup(rootB, "in-a", nfsErrNoEnt)
+
+	fh := c.create(rootB, "made-in-b")
+	c.write(fh, 0, []byte("b!"))
+	if got, _ := simplefs.ReadFile(t.Context(), b, "/made-in-b"); string(got) != "b!" {
+		t.Fatalf("export b content = %q", got)
+	}
+
+	// Renames cannot cross exports.
+	args := newWriter()
+	args.opaque(rootA)
+	args.string("in-a")
+	args.opaque(rootB)
+	args.string("moved")
+	r := c.nfsCall(nfsProcRename, args, nfsErrXDev)
+	skipWcc(r)
+	skipWcc(r)
+
+	r = c.call(progMount, 3, mountProcExport, nil)
+	var names []string
+	for r.bool() {
+		names = append(names, r.string())
+		for r.bool() {
+			r.string()
+		}
+	}
+	if !slices.Equal(names, []string{"/", "/second"}) {
+		t.Fatalf("EXPORT = %v", names)
+	}
+
+	if err := srv.Unexport("second"); err != nil {
+		t.Fatal(err)
+	}
+	args = newWriter()
+	args.opaque(rootB)
+	c.nfsCall(nfsProcGetattr, args, nfsErrStale)
+	c.lookup(rootA, "in-a", nfsOK)
 }

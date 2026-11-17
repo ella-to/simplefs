@@ -18,6 +18,7 @@ const (
 	nfsErrIO          = 5
 	nfsErrAcces       = 13
 	nfsErrExist       = 17
+	nfsErrXDev        = 18
 	nfsErrNotDir      = 20
 	nfsErrIsDir       = 21
 	nfsErrInval       = 22
@@ -38,7 +39,7 @@ const (
 // errStatus translates a provider error into an nfsstat3 code, logging
 // errors that have no precise NFS equivalent (they reach the client as EIO,
 // so the log is the only place their cause survives).
-func (s *Server) errStatus(err error) uint32 {
+func (s *export) errStatus(err error) uint32 {
 	st := statusOf(err)
 	if st == nfsErrIO {
 		s.log.Warn("nfs: provider error reported as EIO", "err", err)
@@ -129,7 +130,7 @@ func effectiveMode(info simplefs.FileInfo) uint32 {
 }
 
 // writeFattr3 encodes the full fattr3 for info, using id as fileid3.
-func (s *Server) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
+func (s *export) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
 	mode := effectiveMode(info)
 	nlink := uint32(1)
 	if info.Type.IsDir() {
@@ -151,19 +152,20 @@ func (s *Server) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
 	w.uint64(uint64(info.Size+511) &^ 511) // used (rounded to 512)
 	w.uint32(0)                            // rdev major
 	w.uint32(0)                            // rdev minor
-	w.uint64(fsid)                         // fsid
+	w.uint64(s.fsid())                     // fsid
 	w.uint64(fileid)                       // fileid
 	writeTime(w, info.ModTime)             // atime
 	writeTime(w, info.ModTime)             // mtime
 	writeTime(w, info.ModTime)             // ctime
 }
 
-// fsid identifies this filesystem in every fattr3 ("SFS1" as an integer).
-const fsid = 0x53465331
+// fsidBase identifies the root export in every fattr3 ("SFS1" as an
+// integer); other exports add their index.
+const fsidBase = 0x53465331
 
 // postOpAttr encodes a post_op_attr: stat the path and attach attributes if
 // that works, else "attributes_follow = false".
-func (s *Server) postOpAttr(ctx context.Context, w *xdrWriter, path string, id uint64) {
+func (s *export) postOpAttr(ctx context.Context, w *xdrWriter, path string, id uint64) {
 	info, err := s.stat(ctx, path, id)
 	if err != nil {
 		w.bool(false)
@@ -174,7 +176,7 @@ func (s *Server) postOpAttr(ctx context.Context, w *xdrWriter, path string, id u
 }
 
 // postOpAttrInfo encodes a post_op_attr from an already-fetched FileInfo.
-func (s *Server) postOpAttrInfo(w *xdrWriter, info simplefs.FileInfo, id uint64) {
+func (s *export) postOpAttrInfo(w *xdrWriter, info simplefs.FileInfo, id uint64) {
 	w.bool(true)
 	s.writeFattr3(w, info, id)
 }
@@ -184,7 +186,7 @@ func postOpNone(w *xdrWriter) { w.bool(false) }
 
 // wccData encodes wcc_data with no pre-op attributes and best-effort post-op
 // attributes for path (RFC 1813 allows both sides to be absent).
-func (s *Server) wccData(ctx context.Context, w *xdrWriter, path string, id uint64) {
+func (s *export) wccData(ctx context.Context, w *xdrWriter, path string, id uint64) {
 	w.bool(false) // pre_op_attr absent
 	s.postOpAttr(ctx, w, path, id)
 }
@@ -196,7 +198,7 @@ func wccNone(w *xdrWriter) {
 }
 
 // postOpFH encodes a post_op_fh3 carrying the handle for id.
-func (s *Server) postOpFH(w *xdrWriter, id uint64) {
+func (s *export) postOpFH(w *xdrWriter, id uint64) {
 	w.bool(true)
 	w.opaque(s.encodeFH(id))
 }
@@ -251,7 +253,7 @@ func readSattr3(r *xdrReader) sattr3 {
 // and — when the provider implements the matching capability — mode,
 // ownership, and times. Attributes reported back still use Options.UID/GID
 // (the provider model has no owner field).
-func (s *Server) applySattr(ctx context.Context, path string, id uint64, a sattr3) error {
+func (s *export) applySattr(ctx context.Context, path string, id uint64, a sattr3) error {
 	defer s.attrs.drop(id)
 	if a.setSize {
 		h, release, err := s.files.acquire(ctx, id, path, true)

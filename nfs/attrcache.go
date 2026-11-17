@@ -69,7 +69,7 @@ func (c *attrCache) drop(id uint64) {
 
 // stat returns path's metadata, from the cache when fresh. id may be 0 when
 // the caller does not know it.
-func (s *Server) stat(ctx context.Context, path string, id uint64) (simplefs.FileInfo, error) {
+func (s *export) stat(ctx context.Context, path string, id uint64) (simplefs.FileInfo, error) {
 	if id == 0 {
 		id, _ = s.fh.Lookup(path)
 	}
@@ -85,7 +85,7 @@ func (s *Server) stat(ctx context.Context, path string, id uint64) (simplefs.Fil
 
 // invalidate drops cached attributes (and directory listings) for paths
 // the server just changed.
-func (s *Server) invalidate(paths ...string) {
+func (s *export) invalidate(paths ...string) {
 	for _, p := range paths {
 		if id, ok := s.fh.Lookup(p); ok {
 			s.attrs.drop(id)
@@ -96,7 +96,7 @@ func (s *Server) invalidate(paths ...string) {
 
 // watchInvalidate keeps the caches honest about changes the provider makes
 // itself, for providers that can report them.
-func (s *Server) watchInvalidate() {
+func (s *export) watchInvalidate() {
 	wp, ok := simplefs.As[simplefs.WatchProvider](s.p)
 	if !ok {
 		return

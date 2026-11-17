@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"ella.to/simplefs"
-	"ella.to/simplefs/internal/idtable"
 )
 
 // ErrServerClosed is returned by ListenAndServe, Serve, and ServePacket after
@@ -101,30 +100,20 @@ func portmapErr(err error) error {
 		"or binding low ports needs privileges): " + err.Error())
 }
 
-// Server serves one simplefs.FileProvider as one NFS export ("/").
+// Server serves simplefs.FileProviders over NFSv3: the one given to
+// NewServer as the root export "/", plus any added with Export.
 type Server struct {
-	p      simplefs.FileProvider
 	ctx    context.Context // cancelled by Close: aborts in-flight provider calls
 	cancel context.CancelFunc
 	opts   Options
 	log    *slog.Logger
-
-	fh    *idtable.Table[uint64]
-	files *openCache
-	attrs *attrCache
-	dirs  *dirCache
-	drc   *drc
-
-	// fsReadOnly caches FSInfo.ReadOnly from the most recent StatFS call
-	// (clients issue FSSTAT/FSINFO at mount time and periodically).
-	fsReadOnly atomic.Bool
+	drc    *drc
 
 	writeVerf [8]byte
 	bootID    [8]byte // random per Server; part of every filehandle
 
-	verfMu     sync.Mutex
-	createVerf map[string][8]byte // path -> exclusive-create verifier
-	verfOrder  []string           // insertion order, for bounding createVerf
+	expMu   sync.RWMutex
+	exports []*export // by index; nil once unexported
 
 	mu        sync.Mutex
 	port      int
@@ -151,54 +140,23 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		p:          p,
-		ctx:        ctx,
-		cancel:     cancel,
-		opts:       opts,
-		log:        log,
-		fh:         newFHTable(),
-		files:      newOpenCache(p, opts.HandleIdle),
-		attrs:      newAttrCache(opts.AttrCacheTTL),
-		dirs:       newDirCache(),
-		drc:        newDRC(),
-		createVerf: map[string][8]byte{},
-		conns:      map[net.Conn]struct{}{},
-		done:       make(chan struct{}),
+		ctx:    ctx,
+		cancel: cancel,
+		opts:   opts,
+		log:    log,
+		drc:    newDRC(),
+		conns:  map[net.Conn]struct{}{},
+		done:   make(chan struct{}),
 	}
 	rand.Read(s.writeVerf[:])
 	rand.Read(s.bootID[:])
-	switch {
-	case opts.MaxHandles == 0:
-		s.fh.SetLimit(1<<20, s.files.inUse)
-	case opts.MaxHandles > 0:
-		s.fh.SetLimit(opts.MaxHandles, s.files.inUse)
-	}
-	if opts.AttrCacheTTL > 0 {
-		go s.watchInvalidate()
-	}
+	s.exports = []*export{newExport(s, 0, "/", p)}
 	return s
 }
 
-// statFS queries the provider's StatFSProvider capability, if any, and
-// refreshes the cached read-only state.
-func (s *Server) statFS(ctx context.Context) (simplefs.FSInfo, bool) {
-	sp, ok := simplefs.As[simplefs.StatFSProvider](s.p)
-	if !ok {
-		return simplefs.FSInfo{}, false
-	}
-	info, err := sp.StatFS(ctx)
-	if err != nil {
-		return simplefs.FSInfo{}, false
-	}
-	s.fsReadOnly.Store(info.ReadOnly)
-	return info, true
-}
-
-// readOnly reports whether the export must be treated as read-only.
-func (s *Server) readOnly() bool { return s.opts.ReadOnly || s.fsReadOnly.Load() }
-
-// Provider returns the wrapped simplefs.FileProvider.
-func (s *Server) Provider() simplefs.FileProvider { return s.p }
+// Provider returns the provider of the root export (the one given to
+// NewServer).
+func (s *Server) Provider() simplefs.FileProvider { return s.root().p }
 
 // Port returns the TCP/UDP port the server accepted its first listener on
 // (0 before ListenAndServe/Serve).
@@ -477,68 +435,13 @@ func (s *Server) Close() error {
 		c.Close()
 	}
 	s.wg.Wait()
-	s.files.shutdown()
-	s.log.Info("nfs: server closed")
-	return nil
-}
-
-// maxCreateVerfs bounds how many exclusive-create verifiers are remembered;
-// a retransmission only ever arrives shortly after the original call.
-const maxCreateVerfs = 1024
-
-// sameCreateVerf reports whether path was created by an exclusive CREATE with
-// this verifier (i.e. the call is a retransmission).
-func (s *Server) sameCreateVerf(path string, verf [8]byte) bool {
-	s.verfMu.Lock()
-	defer s.verfMu.Unlock()
-	v, ok := s.createVerf[path]
-	return ok && v == verf
-}
-
-func (s *Server) rememberCreateVerf(path string, verf [8]byte) {
-	s.verfMu.Lock()
-	defer s.verfMu.Unlock()
-	if _, ok := s.createVerf[path]; !ok {
-		s.verfOrder = append(s.verfOrder, path)
-	}
-	s.createVerf[path] = verf
-	for len(s.createVerf) > maxCreateVerfs && len(s.verfOrder) > 0 {
-		oldest := s.verfOrder[0]
-		s.verfOrder = s.verfOrder[1:]
-		delete(s.createVerf, oldest)
-	}
-	if len(s.verfOrder) > 2*maxCreateVerfs {
-		s.compactVerfOrderLocked()
-	}
-}
-
-func (s *Server) forgetCreateVerf(path string) {
-	s.verfMu.Lock()
-	delete(s.createVerf, path)
-	s.verfMu.Unlock()
-}
-
-// renameCreateVerf moves a remembered verifier along with its file.
-func (s *Server) renameCreateVerf(oldPath, newPath string) {
-	s.verfMu.Lock()
-	defer s.verfMu.Unlock()
-	delete(s.createVerf, newPath)
-	if v, ok := s.createVerf[oldPath]; ok {
-		delete(s.createVerf, oldPath)
-		s.createVerf[newPath] = v
-		s.verfOrder = append(s.verfOrder, newPath)
-	}
-}
-
-// compactVerfOrderLocked drops order entries whose verifier is gone.
-func (s *Server) compactVerfOrderLocked() {
-	seen := make(map[string]bool, len(s.createVerf))
-	kept := s.verfOrder[:0]
-	for _, p := range s.verfOrder {
-		if _, ok := s.createVerf[p]; ok && !seen[p] {
-			seen[p] = true
-			kept = append(kept, p)
+	s.expMu.Lock()
+	for _, e := range s.exports {
+		if e != nil {
+			e.files.shutdown()
 		}
 	}
-	s.verfOrder = kept
+	s.expMu.Unlock()
+	s.log.Info("nfs: server closed")
+	return nil
 }

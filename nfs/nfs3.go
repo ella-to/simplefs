@@ -43,19 +43,16 @@ const (
 const maxIO = 1 << 20
 
 // fhPath decodes a filehandle argument and resolves it to a provider path.
-func (s *Server) fhPath(r *xdrReader) (path string, id uint64, stat uint32) {
+func (s *export) fhPath(r *xdrReader) (path string, id uint64, stat uint32) {
 	fh := r.opaque()
 	if r.err != nil {
 		return "", 0, nfsErrBadHandle
 	}
-	id, stale, ok := s.decodeFH(fh)
-	if !ok {
-		return "", 0, nfsErrBadHandle
+	id, st := s.decodeFH(fh)
+	if st != nfsOK {
+		return "", 0, st
 	}
-	if stale {
-		return "", 0, nfsErrStale
-	}
-	path, ok = s.fh.Path(id)
+	path, ok := s.fh.Path(id)
 	if !ok {
 		return "", 0, nfsErrStale
 	}
@@ -77,7 +74,44 @@ func mutating(proc uint32) bool {
 	return false
 }
 
-func (s *Server) nfsProc(c *rpcCall) *xdrWriter {
+// nfsProc routes an NFSv3 call to the export its (first) filehandle names.
+func (srv *Server) nfsProc(c *rpcCall) *xdrWriter {
+	if c.proc == nfsProcNull {
+		return replyHeader(c.xid, acceptSuccess)
+	}
+	peek := *c.args // every other procedure starts with a filehandle
+	s, st := srv.exportOf(peek.opaque())
+	if st != nfsOK {
+		w := replyHeader(c.xid, acceptSuccess)
+		w.uint32(st)
+		emptyResult(w, c.proc)
+		return w
+	}
+	return s.proc(c)
+}
+
+// emptyResult encodes the failure arm after the status for proc: absent
+// attributes / wcc_data in the shape each procedure's result needs.
+func emptyResult(w *xdrWriter, proc uint32) {
+	switch proc {
+	case nfsProcGetattr:
+		// GETATTR3resfail is void.
+	case nfsProcFsstat, nfsProcFsinfo, nfsProcPathconf, nfsProcLookup, nfsProcAccess,
+		nfsProcReadlink, nfsProcRead, nfsProcReaddir, nfsProcReaddirplus:
+		postOpNone(w)
+	case nfsProcRename:
+		wccNone(w)
+		wccNone(w)
+	case nfsProcLink:
+		postOpNone(w)
+		wccNone(w)
+	default:
+		wccNone(w)
+	}
+}
+
+// proc executes an NFSv3 call against this export.
+func (s *export) proc(c *rpcCall) *xdrWriter {
 	ctx := c.ctx
 	w := replyHeader(c.xid, acceptSuccess)
 	if s.opts.ReadOnly && mutating(c.proc) {
@@ -148,7 +182,7 @@ func (s *Server) nfsProc(c *rpcCall) *xdrWriter {
 	return w
 }
 
-func (s *Server) opGetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opGetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	if stat != nfsOK {
 		w.uint32(stat)
@@ -163,7 +197,7 @@ func (s *Server) opGetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	s.writeFattr3(w, info, id)
 }
 
-func (s *Server) opSetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opSetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	attr := readSattr3(r)
 	if guard := r.bool(); guard {
@@ -184,7 +218,7 @@ func (s *Server) opSetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	s.wccData(ctx, w, path, id)
 }
 
-func (s *Server) opLookup(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opLookup(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	dir, dirID, stat := s.fhPath(r)
 	name := r.string()
 	if stat != nfsOK {
@@ -229,7 +263,7 @@ const (
 	accessExecute = 0x20
 )
 
-func (s *Server) opAccess(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opAccess(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	req := r.uint32()
 	if stat != nfsOK {
@@ -251,7 +285,7 @@ func (s *Server) opAccess(ctx context.Context, r *xdrReader, w *xdrWriter) {
 // accessMask derives the ACCESS3 rights from the owner permission bits (the
 // server reports a single owner for every file, see Options.UID) and the
 // read-only state. Individual operations can still fail with ErrPermission.
-func (s *Server) accessMask(ctx context.Context, info simplefs.FileInfo) uint32 {
+func (s *export) accessMask(ctx context.Context, info simplefs.FileInfo) uint32 {
 	mode := effectiveMode(info)
 	var m uint32
 	if mode&0o400 != 0 {
@@ -276,7 +310,7 @@ func (s *Server) accessMask(ctx context.Context, info simplefs.FileInfo) uint32 
 	return m
 }
 
-func (s *Server) opReadlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opReadlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	if stat != nfsOK {
 		w.uint32(stat)
@@ -300,7 +334,7 @@ func (s *Server) opReadlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	w.string(target)
 }
 
-func (s *Server) opRead(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opRead(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	offset := r.uint64()
 	count := r.uint32()
@@ -347,7 +381,7 @@ const (
 	writeFileSync = 2
 )
 
-func (s *Server) opWrite(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opWrite(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	offset := r.uint64()
 	count := r.uint32()
@@ -403,7 +437,7 @@ const (
 	createExclusive = 2
 )
 
-func (s *Server) opCreate(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opCreate(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	dir, dirID, stat := s.fhPath(r)
 	name := r.string()
 	how := r.uint32()
@@ -469,7 +503,7 @@ func (s *Server) opCreate(ctx context.Context, r *xdrReader, w *xdrWriter) {
 }
 
 // createOK writes the success arm shared by CREATE and its retransmissions.
-func (s *Server) createOK(ctx context.Context, w *xdrWriter, path, dir string, dirID uint64) {
+func (s *export) createOK(ctx context.Context, w *xdrWriter, path, dir string, dirID uint64) {
 	id := s.fh.ID(path)
 	w.uint32(nfsOK)
 	s.postOpFH(w, id)
@@ -477,7 +511,7 @@ func (s *Server) createOK(ctx context.Context, w *xdrWriter, path, dir string, d
 	s.wccData(ctx, w, dir, dirID)
 }
 
-func (s *Server) opMkdir(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opMkdir(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	dir, dirID, stat := s.fhPath(r)
 	name := r.string()
 	attr := readSattr3(r)
@@ -503,7 +537,7 @@ func (s *Server) opMkdir(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	s.createOK(ctx, w, path, dir, dirID)
 }
 
-func (s *Server) opSymlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opSymlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	dir, dirID, stat := s.fhPath(r)
 	name := r.string()
 	readSattr3(r) // symlink attributes (ignored)
@@ -532,7 +566,7 @@ func (s *Server) opSymlink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	s.createOK(ctx, w, path, dir, dirID)
 }
 
-func (s *Server) opRemove(ctx context.Context, r *xdrReader, w *xdrWriter, wantDir bool) {
+func (s *export) opRemove(ctx context.Context, r *xdrReader, w *xdrWriter, wantDir bool) {
 	dir, dirID, stat := s.fhPath(r)
 	name := r.string()
 	if stat == nfsOK {
@@ -572,7 +606,7 @@ func (s *Server) opRemove(ctx context.Context, r *xdrReader, w *xdrWriter, wantD
 	s.wccData(ctx, w, dir, dirID)
 }
 
-func (s *Server) opRename(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opRename(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	fromDir, fromDirID, stat1 := s.fhPath(r)
 	fromName := r.string()
 	toDir, toDirID, stat2 := s.fhPath(r)
@@ -615,7 +649,7 @@ func (s *Server) opRename(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	s.wccData(ctx, w, toDir, toDirID)
 }
 
-func (s *Server) opLink(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opLink(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	dir, dirID, stat2 := s.fhPath(r)
 	name := r.string()
@@ -660,7 +694,7 @@ type dirEntry struct {
 }
 
 // listDir drains the provider's pagination and prepends "." and "..".
-func (s *Server) listDir(ctx context.Context, dir string, dirID uint64) ([]dirEntry, error) {
+func (s *export) listDir(ctx context.Context, dir string, dirID uint64) ([]dirEntry, error) {
 	parent := simplefs.ParentPath(dir)
 	entries := []dirEntry{
 		{name: ".", path: dir, id: dirID},
@@ -683,7 +717,7 @@ func (s *Server) listDir(ctx context.Context, dir string, dirID uint64) ([]dirEn
 	return entries, nil
 }
 
-func (s *Server) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus bool) {
+func (s *export) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus bool) {
 	dir, dirID, stat := s.fhPath(r)
 	cookie := r.uint64()
 	verf := [8]byte(r.bytesN(8))
@@ -756,7 +790,7 @@ func (s *Server) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus
 	w.bool(eof)
 }
 
-func (s *Server) opFsstat(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opFsstat(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	if stat != nfsOK {
 		w.uint32(stat)
@@ -789,7 +823,7 @@ const (
 	fsfCansettime  = 0x10
 )
 
-func (s *Server) opFsinfo(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opFsinfo(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	if stat != nfsOK {
 		w.uint32(stat)
@@ -821,7 +855,7 @@ func (s *Server) opFsinfo(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	w.uint32(props)
 }
 
-func (s *Server) opPathconf(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opPathconf(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	if stat != nfsOK {
 		w.uint32(stat)
@@ -842,7 +876,7 @@ func (s *Server) opPathconf(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	w.bool(true)      // case_preserving
 }
 
-func (s *Server) opCommit(ctx context.Context, r *xdrReader, w *xdrWriter) {
+func (s *export) opCommit(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	r.uint64() // offset
 	r.uint32() // count
