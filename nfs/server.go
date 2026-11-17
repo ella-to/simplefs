@@ -105,6 +105,7 @@ type Server struct {
 	fh    *idtable.Table[uint64]
 	files *openCache
 	attrs *attrCache
+	dirs  *dirCache
 
 	// fsReadOnly caches FSInfo.ReadOnly from the most recent StatFS call
 	// (clients issue FSSTAT/FSINFO at mount time and periodically).
@@ -150,6 +151,7 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 		fh:         newFHTable(),
 		files:      newOpenCache(p, opts.HandleIdle),
 		attrs:      newAttrCache(opts.AttrCacheTTL),
+		dirs:       newDirCache(),
 		createVerf: map[string][8]byte{},
 		conns:      map[net.Conn]struct{}{},
 		done:       make(chan struct{}),

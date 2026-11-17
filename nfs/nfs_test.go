@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -896,4 +897,42 @@ func (c *testClient) callNoWait(prog, vers, proc uint32, args *xdrWriter) {
 	binary.BigEndian.PutUint32(out, 0x80000000|uint32(len(msg)))
 	copy(out[4:], msg)
 	c.conn.Write(out)
+}
+
+func TestReaddirSnapshotVerifier(t *testing.T) {
+	p := memfs.New()
+	for i := range 50 {
+		simplefs.WriteFile(t.Context(), p, "/f"+strconv.Itoa(i), nil, 0)
+	}
+	_, c := startServerWith(t, p, Options{})
+	root := c.mnt()
+	readdir := func(cookie uint64, verf []byte, want uint32) (uint64, []byte) {
+		args := newWriter()
+		args.opaque(root)
+		args.uint64(cookie)
+		args.raw(verf)
+		args.uint32(512)
+		r := c.nfsCall(nfsProcReaddir, args, want)
+		if want != nfsOK {
+			return 0, nil
+		}
+		skipPostOpAttr(r)
+		v := slices.Clone(r.bytesN(8))
+		var last uint64
+		for r.bool() {
+			r.uint64()
+			r.string()
+			last = r.uint64()
+		}
+		return last, v
+	}
+	cookie, verf := readdir(0, make([]byte, 8), nfsOK)
+	if bytes.Equal(verf, make([]byte, 8)) {
+		t.Fatal("READDIR returned a zero cookie verifier")
+	}
+	if _, v2 := readdir(cookie, verf, nfsOK); !bytes.Equal(v2, verf) {
+		t.Fatal("continuation changed the verifier")
+	}
+	bogus := []byte{9, 9, 9, 9, 9, 9, 9, 9}
+	readdir(cookie, bogus, errBadCookie)
 }

@@ -89,6 +89,7 @@ func (s *Server) invalidate(paths ...string) {
 	for _, p := range paths {
 		if id, ok := s.fh.Lookup(p); ok {
 			s.attrs.drop(id)
+			s.dirs.drop(id)
 		}
 	}
 }

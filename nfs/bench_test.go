@@ -183,16 +183,17 @@ func BenchmarkReaddirplus(b *testing.B) {
 			b.ResetTimer()
 			for range b.N {
 				var cookie uint64
+				verf := make([]byte, 8)
 				for {
 					args := newWriter()
 					args.opaque(root)
 					args.uint64(cookie)
-					args.raw(make([]byte, 8))
+					args.raw(verf)
 					args.uint32(8192)
 					args.uint32(32768)
 					r := c.nfsCall(nfsProcReaddirplus, args, nfsOK)
 					skipPostOpAttr(r)
-					r.bytesN(8)
+					verf = append(verf[:0], r.bytesN(8)...)
 					n := 0
 					for r.bool() {
 						r.uint64()

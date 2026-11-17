@@ -682,7 +682,7 @@ func (s *Server) listDir(ctx context.Context, dir string, dirID uint64) ([]dirEn
 func (s *Server) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus bool) {
 	dir, dirID, stat := s.fhPath(r)
 	cookie := r.uint64()
-	r.bytesN(8) // cookieverf (this server's listings are always verifier 0)
+	verf := [8]byte(r.bytesN(8))
 	var budget uint32
 	if plus {
 		r.uint32() // dircount
@@ -698,19 +698,20 @@ func (s *Server) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus
 	if budget > maxIO {
 		budget = maxIO
 	}
-	entries, err := s.listDir(ctx, dir, dirID)
-	if err != nil {
-		w.uint32(s.errStatus(err))
+	snap, st := s.snapshot(ctx, dir, dirID, cookie, verf)
+	if st != nfsOK {
+		w.uint32(st)
 		s.postOpAttr(ctx, w, dir, dirID)
 		return
 	}
+	entries := snap.entries
 	if cookie > uint64(len(entries)) {
 		cookie = uint64(len(entries))
 	}
 
 	w.uint32(nfsOK)
 	s.postOpAttr(ctx, w, dir, dirID)
-	w.raw(make([]byte, 8)) // cookieverf3 = 0
+	w.raw(snap.verf[:])
 
 	// Encode entries until the client's reply-size budget runs out. The
 	// cookie is the 1-based index of the entry, so the next call resumes
@@ -721,7 +722,7 @@ func (s *Server) opReaddir(ctx context.Context, r *xdrReader, w *xdrWriter, plus
 		e := entries[i]
 		cost := uint32(8 + 8 + 4 + pad4(len(e.name)) + 4)
 		if plus {
-			cost += 4 + 84 + 4 + 4 + 8
+			cost += 4 + 84 + 4 + 4 + fhLen // post_op_attr + post_op_fh3
 		}
 		if used+cost > budget {
 			eof = false
