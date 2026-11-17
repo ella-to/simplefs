@@ -134,18 +134,27 @@ type DirPage struct {
 	NextToken string
 }
 
-// OpenOptions control how a file is opened.
+// OpenOptions control how a file is opened. They mirror the os.O_* flags.
 type OpenOptions struct {
-	Read      bool
-	Write     bool
-	Create    bool
-	Truncate  bool
-	Append    bool
-	Exclusive bool
-}
+	// Read and Write select the access mode. Neither set means Read.
+	Read  bool
+	Write bool
 
-// CreateOptions customize Create().
-type CreateOptions struct {
+	// Create creates the file if it does not exist.
+	Create bool
+
+	// Truncate empties an existing file. Requires Write.
+	Truncate bool
+
+	// Append makes every WriteAt write at the end of the file, ignoring
+	// its offset. Requires Write.
+	Append bool
+
+	// Exclusive, with Create, fails with ErrExist if the file exists.
+	Exclusive bool
+
+	// Mode is the permission bits of a file Create creates; zero means
+	// 0o644. It is ignored when the file already exists.
 	Mode FileMode
 }
 
@@ -199,16 +208,14 @@ type FileProvider interface {
 	// Return metadata for a file or directory.
 	Stat(ctx context.Context, path string) (FileInfo, error)
 
-	// Open an existing file (or create one, when opts.Create is set).
+	// Open an existing file, or create one when opts.Create is set. The
+	// Create helper is shorthand for Open{Read, Write, Create, Truncate}.
 	Open(ctx context.Context, path string, opts OpenOptions) (FileHandle, error)
 
 	// Read directory contents.
 	//
 	// Providers may paginate results for very large directories.
 	ReadDir(ctx context.Context, path string, page Page) (DirPage, error)
-
-	// Create a new file, truncating it if it already exists.
-	Create(ctx context.Context, path string, opts CreateOptions) (FileHandle, error)
 
 	// Create a directory.
 	Mkdir(ctx context.Context, path string, opts MkdirOptions) error

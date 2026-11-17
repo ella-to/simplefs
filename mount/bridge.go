@@ -282,7 +282,11 @@ func (b *Bridge) Create(name, parentID string, dir bool, content []byte) (Item, 
 			return Item{}, wrapErr(err)
 		}
 	} else {
-		h, err := b.p.Create(b.ctx, path, simplefs.CreateOptions{Mode: 0o644})
+		// Exclusive: a name collision must surface as a conflict (Finder
+		// then picks "name 2") instead of silently replacing the file.
+		h, err := b.p.Open(b.ctx, path, simplefs.OpenOptions{
+			Read: true, Write: true, Create: true, Exclusive: true, Mode: 0o644,
+		})
 		if err != nil {
 			return Item{}, wrapErr(err)
 		}

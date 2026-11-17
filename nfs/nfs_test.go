@@ -342,7 +342,7 @@ func TestReaddirPagination(t *testing.T) {
 	root := c.mnt()
 	for i := range 40 {
 		name := "file-" + string(rune('a'+i%26)) + string(rune('0'+i/26))
-		if _, err := srv.Provider().Create(t.Context(), "/"+name, simplefs.CreateOptions{}); err != nil {
+		if _, err := simplefs.Create(t.Context(), srv.Provider(), "/"+name, 0); err != nil {
 			t.Fatal(err)
 		}
 	}

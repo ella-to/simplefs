@@ -5,6 +5,7 @@ package nfs
 // simplefs.FileProvider calls.
 
 import (
+	"errors"
 	"io"
 	"strings"
 
@@ -395,25 +396,27 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 	}
 	path := simplefs.JoinPath(dir, name)
 
-	if how != createUnchecked {
-		if _, err := s.p.Stat(s.ctx, path); err == nil {
-			if how == createExclusive && s.sameCreateVerf(path, verf) {
-				// Retransmitted exclusive create: report success again.
-				s.createOK(w, path, dir, dirID)
-				return
-			}
-			w.uint32(nfsErrExist)
-			s.wccData(w, dir, dirID)
-			return
-		}
-	}
-
 	mode := simplefs.FileMode(0o644)
 	if attr.setMode {
 		mode = simplefs.FileMode(attr.mode)
 	}
-	h, err := s.p.Create(s.ctx, path, simplefs.CreateOptions{Mode: mode})
+	// One Open does the existence check and the creation atomically:
+	// GUARDED and EXCLUSIVE fail on an existing file, UNCHECKED truncates
+	// only when the client asked for size 0.
+	h, err := s.p.Open(s.ctx, path, simplefs.OpenOptions{
+		Read:      true,
+		Write:     true,
+		Create:    true,
+		Exclusive: how != createUnchecked,
+		Truncate:  how == createUnchecked && attr.setSize && attr.size == 0,
+		Mode:      mode,
+	})
 	if err != nil {
+		if how == createExclusive && errors.Is(err, simplefs.ErrExist) && s.sameCreateVerf(path, verf) {
+			// Retransmitted exclusive create: report success again.
+			s.createOK(w, path, dir, dirID)
+			return
+		}
 		w.uint32(s.errStatus(err))
 		s.wccData(w, dir, dirID)
 		return
@@ -423,8 +426,6 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 	if how == createExclusive {
 		s.rememberCreateVerf(path, verf)
 	} else if attr.setSize && attr.size != 0 {
-		// Create already truncated the file to zero; only a non-zero size
-		// needs another round trip.
 		if err := s.applySattr(path, id, sattr3{setSize: true, size: attr.size}); err != nil {
 			w.uint32(s.errStatus(err))
 			s.wccData(w, dir, dirID)

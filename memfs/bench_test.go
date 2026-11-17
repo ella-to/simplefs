@@ -14,7 +14,7 @@ func BenchmarkSequentialWrite(b *testing.B) {
 	b.SetBytes(total)
 	for b.Loop() {
 		m := New()
-		h, err := m.Create(b.Context(), "/big", simplefs.CreateOptions{})
+		h, err := simplefs.Create(b.Context(), m, "/big", 0)
 		if err != nil {
 			b.Fatal(err)
 		}

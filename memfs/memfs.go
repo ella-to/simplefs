@@ -265,7 +265,8 @@ func (m *MemFS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error
 }
 
 // Open opens the file at path. With opts.Create set a missing file is
-// created (mode 0o644); with opts.Exclusive set an existing file is an error.
+// created with opts.Mode (0o644 when zero); with opts.Exclusive set as well
+// an existing file is an error.
 func (m *MemFS) Open(ctx context.Context, path string, opts simplefs.OpenOptions) (simplefs.FileHandle, error) {
 	p := simplefs.CleanPath(path)
 	if !opts.Read && !opts.Write {
@@ -285,7 +286,11 @@ func (m *MemFS) Open(ctx context.Context, path string, opts simplefs.OpenOptions
 			return nil, patherr("open", p, simplefs.ErrExist)
 		}
 	case errors.Is(err, simplefs.ErrNotExist) && opts.Create:
-		n, err = m.createFileLocked(p, 0o644)
+		mode := opts.Mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		n, err = m.createFileLocked(p, mode)
 		if err != nil {
 			return nil, patherr("open", p, err)
 		}
@@ -321,43 +326,6 @@ func (m *MemFS) createFileLocked(p string, mode simplefs.FileMode) (*node, error
 	parent.bump()
 	m.event(simplefs.EventCreate, p, "", n)
 	return n, nil
-}
-
-// Create creates (or truncates) the file at path and opens it read/write.
-func (m *MemFS) Create(ctx context.Context, path string, opts simplefs.CreateOptions) (simplefs.FileHandle, error) {
-	mode := opts.Mode
-	if mode == 0 {
-		mode = 0o644
-	}
-	p := simplefs.CleanPath(path)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	n, err := m.walk(p)
-	switch {
-	case err == nil:
-		if n.typ.IsDir() {
-			return nil, patherr("create", p, simplefs.ErrIsDir)
-		}
-		if n.typ.IsSymlink() {
-			return nil, patherr("create", p, simplefs.ErrNotSupported)
-		}
-		if len(n.data) > 0 {
-			m.setDataLocked(n, nil)
-			n.modTime = time.Now()
-			n.bump()
-			m.event(simplefs.EventModify, p, "", n)
-		}
-	case errors.Is(err, simplefs.ErrNotExist):
-		n, err = m.createFileLocked(p, mode)
-		if err != nil {
-			return nil, patherr("create", p, err)
-		}
-	default:
-		return nil, patherr("create", p, err)
-	}
-	return m.openHandleLocked(n, p, simplefs.OpenOptions{Read: true, Write: true}), nil
 }
 
 // ReadDir lists the directory at path. Pagination: entries are sorted by

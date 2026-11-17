@@ -44,7 +44,7 @@ func main() {
 	fmt.Println("== create a directory and a file ==")
 	check(provider.Mkdir(ctx, "/docs", simplefs.MkdirOptions{}))
 
-	h, err := provider.Create(ctx, "/docs/hello.txt", simplefs.CreateOptions{Mode: 0o644})
+	h, err := simplefs.Create(ctx, provider, "/docs/hello.txt", 0o644)
 	check(err)
 	_, err = h.WriteAt([]byte("hello from simplefs\n"), 0)
 	check(err)
@@ -131,7 +131,7 @@ func readFile(ctx context.Context, p simplefs.FileProvider, path string) []byte 
 }
 
 func writeFile(ctx context.Context, p simplefs.FileProvider, path string, data []byte) {
-	h, err := p.Create(ctx, path, simplefs.CreateOptions{Mode: 0o644})
+	h, err := simplefs.Create(ctx, p, path, 0o644)
 	check(err)
 	defer h.Close()
 	_, err = h.WriteAt(data, 0)

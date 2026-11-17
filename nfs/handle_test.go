@@ -48,7 +48,7 @@ func waitFor(t *testing.T, cond func() bool) {
 
 func TestOpenCacheUpgradeRetiresBusyHandle(t *testing.T) {
 	p := &closeCounter{MemFS: memfs.New()}
-	h, _ := p.MemFS.Create(t.Context(), "/f", simplefs.CreateOptions{})
+	h, _ := simplefs.Create(t.Context(), p.MemFS, "/f", 0)
 	h.Close()
 
 	c := newOpenCache(p, time.Hour)
@@ -75,7 +75,7 @@ func TestOpenCacheUpgradeRetiresBusyHandle(t *testing.T) {
 
 func TestOpenCacheDropBusyClosesOnRelease(t *testing.T) {
 	p := &closeCounter{MemFS: memfs.New()}
-	h, _ := p.MemFS.Create(t.Context(), "/f", simplefs.CreateOptions{})
+	h, _ := simplefs.Create(t.Context(), p.MemFS, "/f", 0)
 	h.Close()
 
 	c := newOpenCache(p, time.Hour)
@@ -94,7 +94,7 @@ func TestOpenCacheDropBusyClosesOnRelease(t *testing.T) {
 
 func TestOpenCacheSweepsIdle(t *testing.T) {
 	p := &closeCounter{MemFS: memfs.New()}
-	h, _ := p.MemFS.Create(t.Context(), "/f", simplefs.CreateOptions{})
+	h, _ := simplefs.Create(t.Context(), p.MemFS, "/f", 0)
 	h.Close()
 
 	c := newOpenCache(p, 20*time.Millisecond)

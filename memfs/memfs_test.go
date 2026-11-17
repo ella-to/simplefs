@@ -13,7 +13,7 @@ import (
 
 func writeFile(t *testing.T, m *MemFS, path, content string) {
 	t.Helper()
-	h, err := m.Create(t.Context(), path, simplefs.CreateOptions{})
+	h, err := simplefs.Create(t.Context(), m, path, 0)
 	if err != nil {
 		t.Fatalf("create %s: %v", path, err)
 	}
@@ -365,7 +365,7 @@ func TestWatchScope(t *testing.T) {
 func TestShrinkThenGrowReadsZeros(t *testing.T) {
 	ctx := t.Context()
 	m := New()
-	h, err := m.Create(ctx, "/f", simplefs.CreateOptions{})
+	h, err := simplefs.Create(ctx, m, "/f", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestStatFSTracksUsage(t *testing.T) {
 		return m.usedBytes
 	}
 	write := func(path string, n int) {
-		h, err := m.Create(ctx, path, simplefs.CreateOptions{})
+		h, err := simplefs.Create(ctx, m, path, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -429,7 +429,7 @@ func TestHandleStatFollowsRename(t *testing.T) {
 	ctx := t.Context()
 	m := New()
 	m.Mkdir(ctx, "/a", simplefs.MkdirOptions{})
-	h, err := m.Create(ctx, "/a/f", simplefs.CreateOptions{})
+	h, err := simplefs.Create(ctx, m, "/a/f", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestHandleStatFollowsRename(t *testing.T) {
 func TestCapacity(t *testing.T) {
 	ctx := t.Context()
 	m := New(WithCapacity(100))
-	h, err := m.Create(ctx, "/f", simplefs.CreateOptions{})
+	h, err := simplefs.Create(ctx, m, "/f", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
