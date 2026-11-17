@@ -1067,11 +1067,14 @@ func (s *suite) watch(t *testing.T) {
 func (s *suite) readOnly(t *testing.T) {
 	s.run(t, "MutationsFail", func(t *testing.T, ctx context.Context, p simplefs.FileProvider) {
 		checks := map[string]error{
-			"create":   simplefs.WriteFile(ctx, p, "/providertest-new", nil, 0),
-			"mkdir":    p.Mkdir(ctx, "/providertest-dir", simplefs.MkdirOptions{}),
-			"remove":   p.Remove(ctx, "/providertest-new", simplefs.RemoveOptions{Force: true}),
-			"rename":   p.Rename(ctx, "/providertest-a", "/providertest-b", simplefs.RenameOptions{}),
-			"truncate": func() error { _, err := p.Open(ctx, "/x", simplefs.OpenOptions{Write: true, Truncate: true}); return err }(),
+			"create": simplefs.WriteFile(ctx, p, "/providertest-new", nil, 0),
+			"mkdir":  p.Mkdir(ctx, "/providertest-dir", simplefs.MkdirOptions{}),
+			"remove": p.Remove(ctx, "/providertest-new", simplefs.RemoveOptions{Force: true}),
+			"rename": p.Rename(ctx, "/providertest-a", "/providertest-b", simplefs.RenameOptions{}),
+			"truncate": func() error {
+				_, err := p.Open(ctx, "/x", simplefs.OpenOptions{Write: true, Truncate: true})
+				return err
+			}(),
 		}
 		for op, err := range checks {
 			if !errors.Is(err, simplefs.ErrReadOnly) {
