@@ -4,7 +4,12 @@ package nfs
 // and NFSv3 need. Both types collect an error instead of returning one per
 // call so protocol code reads linearly; check err once at the end.
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+
+	"ella.to/simplefs/internal/bufpool"
+)
 
 var errXDR = errors.New("nfs: short or malformed XDR data")
 
@@ -72,12 +77,45 @@ func (r *xdrReader) skipOpaque() { r.opaque() }
 
 // xdrWriter encodes big-endian XDR values into a growing buffer.
 type xdrWriter struct {
-	b []byte
+	b   []byte
+	off int // bytes reserved in front of the payload (the record mark)
 }
 
+// newWriter returns a writer for building arbitrary XDR data.
 func newWriter() *xdrWriter { return &xdrWriter{b: make([]byte, 0, 256)} }
 
-func (w *xdrWriter) bytes() []byte { return w.b }
+// newReplyWriter returns a pooled writer for an RPC reply, with room for the
+// TCP record mark in front so framed can send it without copying. Call
+// release when the reply has been sent.
+func newReplyWriter() *xdrWriter {
+	return &xdrWriter{b: bufpool.Get(4096)[:4], off: 4}
+}
+
+// bytes returns the encoded payload.
+func (w *xdrWriter) bytes() []byte { return w.b[w.off:] }
+
+// framed returns the payload preceded by a last-fragment record mark.
+func (w *xdrWriter) framed() []byte {
+	binary.BigEndian.PutUint32(w.b, 0x80000000|uint32(len(w.b)-4))
+	return w.b
+}
+
+// grow makes room for n more bytes without further reallocation.
+func (w *xdrWriter) grow(n int) {
+	if cap(w.b)-len(w.b) >= n {
+		return
+	}
+	nb := bufpool.Get(len(w.b) + n)[:len(w.b)]
+	copy(nb, w.b)
+	bufpool.Put(w.b)
+	w.b = nb
+}
+
+// release returns the buffer to the pool; w must not be used afterwards.
+func (w *xdrWriter) release() {
+	bufpool.Put(w.b)
+	w.b = nil
+}
 
 func (w *xdrWriter) uint32(v uint32) {
 	w.b = append(w.b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))

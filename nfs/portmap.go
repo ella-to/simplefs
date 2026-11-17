@@ -18,7 +18,7 @@ const (
 	protoUDP = 17
 )
 
-func (s *Server) portmapProc(c *rpcCall) []byte {
+func (s *Server) portmapProc(c *rpcCall) *xdrWriter {
 	w := replyHeader(c.xid, acceptSuccess)
 	switch c.proc {
 	case pmapProcNull:
@@ -54,9 +54,10 @@ func (s *Server) portmapProc(c *rpcCall) []byte {
 		}
 		w.bool(false)
 	default:
-		return replyHeader(c.xid, acceptProcUnavail).bytes()
+		w.release()
+		return replyHeader(c.xid, acceptProcUnavail)
 	}
-	return w.bytes()
+	return w
 }
 
 func programVersions(prog uint32) []uint32 {

@@ -14,7 +14,7 @@ const (
 	mountProcExport  = 5
 )
 
-func (s *Server) mountProc(c *rpcCall) []byte {
+func (s *Server) mountProc(c *rpcCall) *xdrWriter {
 	w := replyHeader(c.xid, acceptSuccess)
 	switch c.proc {
 	case mountProcNull:
@@ -35,7 +35,8 @@ func (s *Server) mountProc(c *rpcCall) []byte {
 		w.bool(false) // no groups
 		w.bool(false) // no more exports
 	default:
-		return replyHeader(c.xid, acceptProcUnavail).bytes()
+		w.release()
+		return replyHeader(c.xid, acceptProcUnavail)
 	}
-	return w.bytes()
+	return w
 }

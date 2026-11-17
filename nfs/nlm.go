@@ -19,7 +19,7 @@ const (
 // nlm4 status codes.
 const nlmGranted = 0
 
-func (s *Server) nlmProc(c *rpcCall) []byte {
+func (s *Server) nlmProc(c *rpcCall) *xdrWriter {
 	w := replyHeader(c.xid, acceptSuccess)
 	switch c.proc {
 	case nlmProcNull, nlmProcFree:
@@ -32,7 +32,8 @@ func (s *Server) nlmProc(c *rpcCall) []byte {
 		w.opaque(cookie)
 		w.uint32(nlmGranted)
 	default:
-		return replyHeader(c.xid, acceptProcUnavail).bytes()
+		w.release()
+		return replyHeader(c.xid, acceptProcUnavail)
 	}
-	return w.bytes()
+	return w
 }

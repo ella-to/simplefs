@@ -10,6 +10,7 @@ import (
 	"io"
 
 	"ella.to/simplefs"
+	"ella.to/simplefs/internal/bufpool"
 )
 
 // NFSv3 procedure numbers.
@@ -76,7 +77,7 @@ func mutating(proc uint32) bool {
 	return false
 }
 
-func (s *Server) nfsProc(c *rpcCall) []byte {
+func (s *Server) nfsProc(c *rpcCall) *xdrWriter {
 	ctx := c.ctx
 	w := replyHeader(c.xid, acceptSuccess)
 	if s.opts.ReadOnly && mutating(c.proc) {
@@ -93,7 +94,7 @@ func (s *Server) nfsProc(c *rpcCall) []byte {
 		default:
 			wccNone(w)
 		}
-		return w.bytes()
+		return w
 	}
 	switch c.proc {
 	case nfsProcNull:
@@ -141,9 +142,10 @@ func (s *Server) nfsProc(c *rpcCall) []byte {
 	case nfsProcCommit:
 		s.opCommit(ctx, c.args, w)
 	default:
-		return replyHeader(c.xid, acceptProcUnavail).bytes()
+		w.release()
+		return replyHeader(c.xid, acceptProcUnavail)
 	}
-	return w.bytes()
+	return w
 }
 
 func (s *Server) opGetattr(ctx context.Context, r *xdrReader, w *xdrWriter) {
@@ -317,7 +319,8 @@ func (s *Server) opRead(ctx context.Context, r *xdrReader, w *xdrWriter) {
 		return
 	}
 	defer release()
-	buf := make([]byte, count)
+	buf := bufpool.Get(int(count))
+	defer bufpool.Put(buf)
 	n, rerr := h.ReadAt(buf, int64(offset))
 	if rerr != nil && rerr != io.EOF {
 		w.uint32(s.errStatus(rerr))
@@ -334,7 +337,8 @@ func (s *Server) opRead(ctx context.Context, r *xdrReader, w *xdrWriter) {
 	}
 	w.uint32(uint32(n))
 	w.bool(eof)
-	w.opaque(buf[:n])
+	w.grow(4 + pad4(n))
+	w.opaque(buf[:n]) // the one copy of the data, into the reply
 }
 
 // WRITE stability levels.

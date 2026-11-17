@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ella.to/simplefs"
+	"ella.to/simplefs/internal/bufpool"
 	"ella.to/simplefs/memfs"
 )
 
@@ -211,6 +212,48 @@ func BenchmarkReaddirplus(b *testing.B) {
 				}
 			}
 			report(b, fs, before)
+		})
+	}
+}
+
+// BenchmarkDispatch measures the server alone (no TCP, no client): one
+// 1 MiB READ or WRITE through dispatch, with the record in a pooled buffer
+// as serveConn provides it.
+func BenchmarkDispatch(b *testing.B) {
+	p := memfs.New(memfs.WithCapacity(4 << 30))
+	simplefs.WriteFile(b.Context(), p, "/f", make([]byte, 64<<20), 0)
+	srv := NewServer(p, Options{AttrCacheTTL: time.Second})
+	defer srv.Close()
+	id := srv.fh.ID("/f")
+	fh := srv.encodeFH(id)
+
+	read := newWriter()
+	read.opaque(fh)
+	read.uint64(0)
+	read.uint32(1 << 20)
+	write := newWriter()
+	write.opaque(fh)
+	write.uint64(0)
+	write.uint32(1 << 20)
+	write.uint32(writeUnstable)
+	write.opaque(make([]byte, 1<<20))
+
+	for _, tc := range []struct {
+		name string
+		proc uint32
+		args *xdrWriter
+	}{{"read", nfsProcRead, read}, {"write", nfsProcWrite, write}} {
+		b.Run(tc.name, func(b *testing.B) {
+			msg := rpcMsg(progNFS, 3, tc.proc, tc.args)
+			b.SetBytes(1 << 20)
+			b.ReportAllocs()
+			for b.Loop() {
+				rec := bufpool.Get(len(msg))
+				copy(rec, msg)
+				reply := srv.dispatch(b.Context(), rec)
+				bufpool.Put(rec)
+				reply.release()
+			}
 		})
 	}
 }

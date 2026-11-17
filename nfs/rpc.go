@@ -11,8 +11,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"time"
+
+	"ella.to/simplefs/internal/bufpool"
 )
 
 // RPC program numbers served.
@@ -82,7 +85,7 @@ func decodeCall(msg []byte) (*rpcCall, error) {
 // replyHeader writes the standard accepted-reply header up to and including
 // accept_stat; for acceptSuccess the procedure results follow.
 func replyHeader(xid, stat uint32) *xdrWriter {
-	w := newWriter()
+	w := newReplyWriter()
 	w.uint32(xid)
 	w.uint32(msgReply)
 	w.uint32(replyAccepted)
@@ -93,28 +96,29 @@ func replyHeader(xid, stat uint32) *xdrWriter {
 }
 
 // replyProgMismatch reports that only version v of the program is served.
-func replyProgMismatch(xid, v uint32) []byte {
+func replyProgMismatch(xid, v uint32) *xdrWriter {
 	w := replyHeader(xid, acceptProgMismatch)
 	w.uint32(v)
 	w.uint32(v)
-	return w.bytes()
+	return w
 }
 
 // replyRPCMismatch is the denied reply for an unsupported RPC version.
-func replyRPCMismatch(xid uint32) []byte {
-	w := newWriter()
+func replyRPCMismatch(xid uint32) *xdrWriter {
+	w := newReplyWriter()
 	w.uint32(xid)
 	w.uint32(msgReply)
 	w.uint32(replyDenied)
 	w.uint32(rejectRPCMismatch)
 	w.uint32(2)
 	w.uint32(2)
-	return w.bytes()
+	return w
 }
 
 // dispatch routes one RPC message to the program implementation and returns
-// the encoded reply (nil to send nothing).
-func (s *Server) dispatch(ctx context.Context, msg []byte) []byte {
+// the encoded reply (nil to send nothing). The caller releases the reply
+// once sent; msg is not retained.
+func (s *Server) dispatch(ctx context.Context, msg []byte) *xdrWriter {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 	c, err := decodeCall(msg)
@@ -158,7 +162,7 @@ func (s *Server) dispatch(ctx context.Context, msg []byte) []byte {
 		}
 		return s.nlmProc(c)
 	default:
-		return replyHeader(c.xid, acceptProgUnavail).bytes()
+		return replyHeader(c.xid, acceptProgUnavail)
 	}
 }
 
@@ -183,6 +187,8 @@ func (s *Server) serveConn(conn net.Conn) {
 	var wmu sync.Mutex
 	var hdr [4]byte
 	for {
+		// Records are read straight into pooled buffers: WRITE data is then
+		// handed to the provider without another copy.
 		var record []byte
 		for {
 			if _, err := io.ReadFull(conn, hdr[:]); err != nil {
@@ -193,12 +199,17 @@ func (s *Server) serveConn(conn net.Conn) {
 			if n > maxRecord || len(record)+n > maxRecord {
 				return
 			}
-			frag := make([]byte, n)
-			if _, err := io.ReadFull(conn, frag); err != nil {
+			last := mark&0x80000000 != 0
+			start := len(record)
+			if record == nil && last {
+				record = bufpool.Get(n) // the common single-fragment case
+			} else {
+				record = slices.Grow(record, n)[:start+n]
+			}
+			if _, err := io.ReadFull(conn, record[start:]); err != nil {
 				return
 			}
-			record = append(record, frag...)
-			if mark&0x80000000 != 0 {
+			if last {
 				break
 			}
 		}
@@ -207,12 +218,12 @@ func (s *Server) serveConn(conn net.Conn) {
 		go func(msg []byte) {
 			defer func() { <-sem; reqs.Done() }()
 			reply := s.dispatch(ctx, msg)
+			bufpool.Put(msg)
 			if reply == nil {
 				return
 			}
-			out := make([]byte, 4+len(reply))
-			binary.BigEndian.PutUint32(out, 0x80000000|uint32(len(reply)))
-			copy(out[4:], reply)
+			defer reply.release()
+			out := reply.framed()
 			wmu.Lock()
 			conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			_, err := conn.Write(out)
@@ -259,7 +270,8 @@ func (s *Server) servePacket(pc net.PacketConn) error {
 		go func(msg []byte, addr net.Addr) {
 			defer reqs.Done()
 			if reply := s.dispatch(s.ctx, msg); reply != nil {
-				pc.WriteTo(reply, addr)
+				pc.WriteTo(reply.bytes(), addr)
+				reply.release()
 			}
 		}(msg, addr)
 	}
