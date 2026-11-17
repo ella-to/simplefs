@@ -241,6 +241,44 @@ func (t *Table[ID]) prune(n *node[ID]) {
 	}
 }
 
+// Restore maps path to id, as recorded by an earlier table (persistence).
+// Any ID path had, and any path id had, are dropped first.
+func (t *Table[ID]) Restore(path string, id ID) {
+	if path == "/" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if old, ok := t.byID[id]; ok && old.parent != nil {
+		t.forgetLocked(old)
+	}
+	n := t.find(path, true)
+	if n.hasID {
+		delete(t.byID, n.id)
+		if n.elem != nil {
+			t.lru.Remove(n.elem)
+			n.elem = nil
+		}
+	}
+	n.id, n.hasID = id, true
+	t.byID[id] = n
+	if t.limit > 0 {
+		n.elem = t.lru.PushFront(n)
+	}
+}
+
+// Each calls fn for every mapped path except the root, in no particular
+// order. fn must not call back into the table.
+func (t *Table[ID]) Each(fn func(path string, id ID)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, n := range t.byID {
+		if n != t.root {
+			fn(pathOf(n), id)
+		}
+	}
+}
+
 // Len reports how many IDs are mapped, the root included.
 func (t *Table[ID]) Len() int {
 	t.mu.Lock()

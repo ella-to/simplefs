@@ -21,6 +21,8 @@ import "C"
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"ella.to/simplefs/fileprovider"
@@ -199,7 +201,23 @@ func ProviderSetHostDir(cpath *C.char) {
 //
 //export ProviderSetDomain
 func ProviderSetDomain(cid *C.char) {
-	fileprovider.SetDomainID(C.GoString(cid))
+	id := C.GoString(cid)
+	fileprovider.SetDomainID(id)
+	// Keep item IDs across extension relaunches (best effort: without a
+	// writable host dir the bridge simply starts fresh).
+	if b, dir := fileprovider.Current(), fileprovider.HostDir(); b != nil && dir != "" {
+		b.Persist(filepath.Join(dir, "simplefs-ids-"+safeName(id)+".log"))
+	}
+}
+
+// safeName makes a domain ID usable as a file name.
+func safeName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == 0 || r == ':' {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // ProviderFree releases a buffer returned by this package.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync/atomic"
 
 	"ella.to/simplefs"
 	"ella.to/simplefs/internal/idtable"
@@ -24,29 +25,30 @@ import (
 //
 // The system addresses items by stable ID while simplefs.FileProvider is
 // path-based, so the bridge keeps an ID<->path table, assigning IDs lazily as
-// paths are discovered and re-keying them on rename and delete. The table
-// lives in memory: after a process restart items receive fresh IDs and the
-// system re-syncs from scratch.
+// paths are discovered and re-keying them on rename and delete. With Persist
+// the table survives extension relaunches; otherwise items receive fresh IDs
+// after a restart and the system re-syncs from scratch.
 type Bridge struct {
 	ctx context.Context
 	p   simplefs.FileProvider
 
-	ids *idtable.Table[string]
+	ids     *idtable.Table[string]
+	seq     atomic.Uint64           // last "sfs-N" handed out
+	journal atomic.Pointer[journal] // set by Persist
 }
+
+// idPrefix starts every item ID the bridge hands out.
+const idPrefix = "sfs-"
 
 // NewBridge wraps p without registering it (useful for tests). Provider calls
 // receive context.Background(); the system does not carry a per-request
 // context across the extension boundary.
 func NewBridge(p simplefs.FileProvider) *Bridge {
-	var next uint64
-	return &Bridge{
-		ctx: context.Background(),
-		p:   p,
-		ids: idtable.New(RootID, func() string {
-			next++
-			return "sfs-" + strconv.FormatUint(next, 10)
-		}),
-	}
+	b := &Bridge{ctx: context.Background(), p: p}
+	b.ids = idtable.New(RootID, func() string {
+		return idPrefix + strconv.FormatUint(b.seq.Add(1), 10)
+	})
+	return b
 }
 
 // Provider returns the wrapped simplefs.FileProvider.
@@ -68,8 +70,16 @@ type UpdateRequest struct {
 	ContentPath string
 }
 
-// idFor returns the stable ID for path, assigning one on first sight.
-func (b *Bridge) idFor(path string) string { return b.ids.ID(path) }
+// idFor returns the stable ID for path, assigning (and journaling) one on
+// first sight.
+func (b *Bridge) idFor(path string) string {
+	if id, ok := b.ids.Lookup(path); ok {
+		return id
+	}
+	id := b.ids.ID(path)
+	b.logAssign(id, path)
+	return id
+}
 
 // pathFor resolves an ID handed to us by the system back to a path.
 func (b *Bridge) pathFor(id string) (string, error) {
@@ -373,6 +383,7 @@ func (b *Bridge) Update(req UpdateRequest) (Item, error) {
 				return Item{}, wrapErr(err)
 			}
 			b.ids.Rekey(path, newPath)
+			b.logRekey(path, newPath)
 			path = newPath
 		}
 	}
@@ -398,5 +409,6 @@ func (b *Bridge) Delete(id string) error {
 		return wrapErr(err)
 	}
 	b.ids.Forget(path)
+	b.logForget(path)
 	return nil
 }

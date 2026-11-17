@@ -140,3 +140,21 @@ func TestLimitEvictsLeastRecentlyUsed(t *testing.T) {
 		t.Fatal("evicted ID reused")
 	}
 }
+
+func TestRestoreAndEach(t *testing.T) {
+	tb := New[uint64](1, counter())
+	tb.Restore("/a/b", 42)
+	tb.Restore("/c", 7)
+	if p, _ := tb.Path(42); p != "/a/b" {
+		t.Fatalf("Path(42) = %q", p)
+	}
+	tb.Restore("/moved", 42) // the same ID at a new path
+	if _, ok := tb.Lookup("/a/b"); ok {
+		t.Fatal("old path of a re-restored ID still mapped")
+	}
+	got := map[string]uint64{}
+	tb.Each(func(p string, id uint64) { got[p] = id })
+	if len(got) != 2 || got["/moved"] != 42 || got["/c"] != 7 {
+		t.Fatalf("Each = %v", got)
+	}
+}

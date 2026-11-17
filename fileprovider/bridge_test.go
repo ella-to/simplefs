@@ -302,3 +302,42 @@ func TestBridgeReadDirPage(t *testing.T) {
 		t.Fatalf("paged %d items, want 7: %v", len(names), names)
 	}
 }
+
+func TestBridgeIDsSurviveRestart(t *testing.T) {
+	p := memfs.New()
+	state := filepath.Join(t.TempDir(), "ids.log")
+
+	b1 := NewBridge(p)
+	if err := b1.Persist(state); err != nil {
+		t.Fatal(err)
+	}
+	folder, _ := b1.Create("docs", RootID, true, "")
+	file := createFile(t, b1, folder.ID, "a.txt", "x")
+	gone := createFile(t, b1, RootID, "gone.txt", "x")
+	if _, err := b1.Update(UpdateRequest{ID: folder.ID, ChangedName: true, NewName: "papers"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b1.Delete(gone.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A new process: same provider, fresh bridge, same journal.
+	b2 := NewBridge(p)
+	if err := b2.Persist(state); err != nil {
+		t.Fatal(err)
+	}
+	it, err := b2.Stat(file.ID)
+	if err != nil || it.Name != "a.txt" || it.ParentID != folder.ID {
+		t.Fatalf("after restart: %+v, %v", it, err)
+	}
+	if _, err := b2.Stat(gone.ID); CodeOfMust(err) != CodeNotFound {
+		t.Fatalf("deleted item resolved after restart: %v", err)
+	}
+	// New IDs continue after the highest one used.
+	fresh := createFile(t, b2, RootID, "new.txt", "")
+	for _, old := range []string{folder.ID, file.ID, gone.ID} {
+		if fresh.ID == old {
+			t.Fatalf("new item reused id %s", old)
+		}
+	}
+}
