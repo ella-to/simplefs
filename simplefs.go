@@ -95,6 +95,16 @@ type FileInfo struct {
 	// decide when cached content is stale. When non-empty it must change
 	// whenever the object's content or metadata changes.
 	ETag string
+
+	// FileID optionally identifies the underlying object: it is stable
+	// across renames and shared by hard links (an inode number). Zero means
+	// unknown. Backends use it as the inode number they report; provide it
+	// for every object or for none, so numbers cannot collide.
+	FileID uint64
+
+	// Links optionally counts the hard links to the object. Zero means
+	// unknown.
+	Links uint32
 }
 
 // Name returns the base name of the object (BaseName of Path).

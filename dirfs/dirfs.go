@@ -86,12 +86,15 @@ func infoOf(path string, fi fs.FileInfo) simplefs.FileInfo {
 	case fi.Mode()&fs.ModeSymlink != 0:
 		t = simplefs.TypeSymlink
 	}
+	ino, links := sysIDs(fi)
 	return simplefs.FileInfo{
 		Path:    simplefs.CleanPath(path),
 		Type:    t,
 		Size:    fi.Size(),
 		Mode:    fi.Mode().Perm(),
 		ModTime: fi.ModTime(),
+		FileID:  ino,
+		Links:   links,
 	}
 }
 

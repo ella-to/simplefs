@@ -135,6 +135,13 @@ func (s *Server) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
 	if info.Type.IsDir() {
 		nlink = 2
 	}
+	if info.Links > 0 && !info.Type.IsDir() {
+		nlink = info.Links
+	}
+	fileid := id
+	if info.FileID != 0 {
+		fileid = info.FileID // the provider's identity: hard links share it
+	}
 	w.uint32(ftype(info.Type))
 	w.uint32(mode)
 	w.uint32(nlink)
@@ -145,7 +152,7 @@ func (s *Server) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
 	w.uint32(0)                            // rdev major
 	w.uint32(0)                            // rdev minor
 	w.uint64(fsid)                         // fsid
-	w.uint64(id)                           // fileid
+	w.uint64(fileid)                       // fileid
 	writeTime(w, info.ModTime)             // atime
 	writeTime(w, info.ModTime)             // mtime
 	writeTime(w, info.ModTime)             // ctime

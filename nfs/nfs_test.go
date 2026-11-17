@@ -988,3 +988,31 @@ func TestMaxHandlesEvictsToStale(t *testing.T) {
 	args.opaque(again)
 	c.nfsCall(nfsProcGetattr, args, nfsOK)
 }
+
+func TestHardLinkSharesFileID(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+	fh := c.create(root, "a")
+	args := newWriter()
+	args.opaque(fh)
+	args.opaque(root)
+	args.string("b")
+	c.nfsCall(nfsProcLink, args, nfsOK)
+	fhB := c.lookup(root, "b", nfsOK)
+
+	attrs := func(fh []byte) (nlink uint32, fileid uint64) {
+		args := newWriter()
+		args.opaque(fh)
+		r := c.nfsCall(nfsProcGetattr, args, nfsOK)
+		r.uint32()         // type
+		r.uint32()         // mode
+		nlink = r.uint32() // nlink
+		r.bytesN(4 + 4 + 8 + 8 + 8 + 8)
+		return nlink, r.uint64()
+	}
+	n1, id1 := attrs(fh)
+	n2, id2 := attrs(fhB)
+	if id1 != id2 || n1 != 2 || n2 != 2 {
+		t.Fatalf("a: nlink %d fileid %d; b: nlink %d fileid %d; want shared fileid, nlink 2", n1, id1, n2, id2)
+	}
+}

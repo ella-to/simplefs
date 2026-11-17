@@ -36,7 +36,8 @@ type node struct {
 	gid     int
 	xattr   map[string][]byte
 	version uint64
-	nlink   int // directory entries referring to this node
+	nlink   int    // directory entries referring to this node
+	ino     uint64 // FileInfo.FileID; shared by hard links
 
 	data     []byte           // TypeFile
 	children map[string]*node // TypeDir
@@ -93,6 +94,8 @@ func (n *node) info(path string) simplefs.FileInfo {
 		Mode:    n.mode,
 		ModTime: n.modTime,
 		ETag:    strconv.FormatUint(n.version, 10),
+		FileID:  n.ino,
+		Links:   uint32(max(n.nlink, 1)),
 	}
 }
 
@@ -126,6 +129,8 @@ type FS struct {
 
 	// handles is every open handle, so Rename can keep their paths current.
 	handles map[*handle]struct{}
+
+	lastIno uint64 // FileIDs handed out so far
 }
 
 var (
@@ -163,15 +168,23 @@ func New(opts ...Option) *FS {
 			children: map[string]*node{},
 			version:  1,
 			nlink:    1,
+			ino:      1,
 		},
 		watchers: map[*watcher]struct{}{},
 		handles:  map[*handle]struct{}{},
 		capacity: DefaultCapacity,
+		lastIno:  1,
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
 	return m
+}
+
+// newIno returns a fresh FileID. Callers must hold m.mu for writing.
+func (m *FS) newIno() uint64 {
+	m.lastIno++
+	return m.lastIno
 }
 
 // reserveLocked reports whether n's content may grow to size bytes without
@@ -358,7 +371,7 @@ func (m *FS) createFileLocked(p string, mode simplefs.FileMode) (*node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &node{typ: simplefs.TypeFile, mode: mode, modTime: time.Now(), version: 1, nlink: 1}
+	n := &node{typ: simplefs.TypeFile, mode: mode, modTime: time.Now(), version: 1, nlink: 1, ino: m.newIno()}
 	parent.setChild(name, n)
 	parent.modTime = n.modTime
 	parent.bump()
@@ -437,6 +450,7 @@ func (m *FS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptions)
 		children: map[string]*node{},
 		version:  1,
 		nlink:    1,
+		ino:      m.newIno(),
 	}
 	parent.setChild(name, n)
 	parent.modTime = n.modTime
@@ -586,7 +600,7 @@ func (m *FS) Symlink(ctx context.Context, target, linkPath string) error {
 	if _, ok := parent.children[name]; ok {
 		return patherr("symlink", p, simplefs.ErrExist)
 	}
-	n := &node{typ: simplefs.TypeSymlink, mode: 0o777, modTime: time.Now(), target: target, version: 1, nlink: 1}
+	n := &node{typ: simplefs.TypeSymlink, mode: 0o777, modTime: time.Now(), target: target, version: 1, nlink: 1, ino: m.newIno()}
 	parent.setChild(name, n)
 	parent.modTime = n.modTime
 	parent.bump()
