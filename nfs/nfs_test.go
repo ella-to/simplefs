@@ -825,3 +825,73 @@ func TestHandleFromAnotherServerIsStale(t *testing.T) {
 	args.opaque(fh[:8])
 	b.nfsCall(nfsProcGetattr, args, nfsErrBadHandle)
 }
+
+// blockingFS blocks Stat on "/slow" until the request context ends.
+type blockingFS struct {
+	*memfs.FS
+	entered chan struct{}
+}
+
+func (b *blockingFS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error) {
+	if path == "/slow" {
+		select {
+		case b.entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return simplefs.FileInfo{}, ctx.Err()
+	}
+	return b.FS.Stat(ctx, path)
+}
+
+func TestRequestTimeoutIsJukebox(t *testing.T) {
+	p := &blockingFS{FS: memfs.New(), entered: make(chan struct{}, 1)}
+	_, c := startServerWith(t, p, Options{Timeout: 50 * time.Millisecond})
+	c.lookup(c.mnt(), "slow", nfsErrJukebox)
+}
+
+func TestCloseCancelsInFlightCalls(t *testing.T) {
+	p := &blockingFS{FS: memfs.New(), entered: make(chan struct{}, 1)}
+	srv, c := startServerWith(t, p, Options{})
+	root := c.mnt()
+	go func() {
+		args := newWriter()
+		args.opaque(root)
+		args.string("slow")
+		c.callNoWait(progNFS, 3, nfsProcLookup, args)
+	}()
+	select {
+	case <-p.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("LOOKUP never reached the provider")
+	}
+	done := make(chan struct{})
+	go func() { srv.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel the blocked provider call")
+	}
+}
+
+// callNoWait sends one RPC without reading the reply.
+func (c *testClient) callNoWait(prog, vers, proc uint32, args *xdrWriter) {
+	c.xid++
+	w := newWriter()
+	w.uint32(c.xid)
+	w.uint32(msgCall)
+	w.uint32(2)
+	w.uint32(prog)
+	w.uint32(vers)
+	w.uint32(proc)
+	w.uint32(authNone)
+	w.uint32(0)
+	w.uint32(authNone)
+	w.uint32(0)
+	w.raw(args.bytes())
+	msg := w.bytes()
+	out := make([]byte, 4+len(msg))
+	binary.BigEndian.PutUint32(out, 0x80000000|uint32(len(msg)))
+	copy(out[4:], msg)
+	c.conn.Write(out)
+}

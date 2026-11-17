@@ -69,6 +69,15 @@ type Options struct {
 	// it reaches the provider, and makes ACCESS deny write rights.
 	ReadOnly bool
 
+	// Timeout bounds each RPC's provider calls; a call that runs out of time
+	// reaches the client as NFS3ERR_JUKEBOX ("try again later"). Zero means
+	// no limit.
+	Timeout time.Duration
+
+	// MaxInFlight bounds the RPCs processed concurrently per connection.
+	// Zero means 64.
+	MaxInFlight int
+
 	// HandleIdle is how long an open provider handle stays cached after its
 	// last READ/WRITE before it is closed. Zero means 5s.
 	HandleIdle time.Duration
@@ -81,10 +90,11 @@ func portmapErr(err error) error {
 
 // Server serves one simplefs.FileProvider as one NFS export ("/").
 type Server struct {
-	p    simplefs.FileProvider
-	ctx  context.Context
-	opts Options
-	log  *slog.Logger
+	p      simplefs.FileProvider
+	ctx    context.Context // cancelled by Close: aborts in-flight provider calls
+	cancel context.CancelFunc
+	opts   Options
+	log    *slog.Logger
 
 	fh    *idtable.Table[uint64]
 	files *openCache
@@ -123,9 +133,11 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		p:          p,
-		ctx:        context.Background(),
+		ctx:        ctx,
+		cancel:     cancel,
 		opts:       opts,
 		log:        log,
 		fh:         newFHTable(),
@@ -141,12 +153,12 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 
 // statFS queries the provider's StatFSProvider capability, if any, and
 // refreshes the cached read-only state.
-func (s *Server) statFS() (simplefs.FSInfo, bool) {
+func (s *Server) statFS(ctx context.Context) (simplefs.FSInfo, bool) {
 	sp, ok := simplefs.As[simplefs.StatFSProvider](s.p)
 	if !ok {
 		return simplefs.FSInfo{}, false
 	}
-	info, err := sp.StatFS(s.ctx)
+	info, err := sp.StatFS(ctx)
 	if err != nil {
 		return simplefs.FSInfo{}, false
 	}
@@ -419,6 +431,7 @@ func (s *Server) Close() error {
 	}
 	s.closed = true
 	close(s.done)
+	s.cancel()
 	lns := s.listeners
 	pcs := s.packets
 	conns := s.conns

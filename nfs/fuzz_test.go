@@ -146,6 +146,6 @@ func FuzzDispatch(f *testing.F) {
 	}
 	f.Cleanup(func() { srv.Close() })
 	f.Fuzz(func(t *testing.T, msg []byte) {
-		srv.dispatch(msg) // must never panic, whatever the bytes
+		srv.dispatch(t.Context(), msg) // must never panic, whatever the bytes
 	})
 }

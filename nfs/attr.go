@@ -156,8 +156,8 @@ const fsid = 0x53465331
 
 // postOpAttr encodes a post_op_attr: stat the path and attach attributes if
 // that works, else "attributes_follow = false".
-func (s *Server) postOpAttr(w *xdrWriter, path string, id uint64) {
-	info, err := s.p.Stat(s.ctx, path)
+func (s *Server) postOpAttr(ctx context.Context, w *xdrWriter, path string, id uint64) {
+	info, err := s.p.Stat(ctx, path)
 	if err != nil {
 		w.bool(false)
 		return
@@ -177,9 +177,9 @@ func postOpNone(w *xdrWriter) { w.bool(false) }
 
 // wccData encodes wcc_data with no pre-op attributes and best-effort post-op
 // attributes for path (RFC 1813 allows both sides to be absent).
-func (s *Server) wccData(w *xdrWriter, path string, id uint64) {
+func (s *Server) wccData(ctx context.Context, w *xdrWriter, path string, id uint64) {
 	w.bool(false) // pre_op_attr absent
-	s.postOpAttr(w, path, id)
+	s.postOpAttr(ctx, w, path, id)
 }
 
 // wccNone encodes wcc_data with neither side present.
@@ -244,13 +244,13 @@ func readSattr3(r *xdrReader) sattr3 {
 // and — when the provider implements the matching capability — mode,
 // ownership, and times. Attributes reported back still use Options.UID/GID
 // (the provider model has no owner field).
-func (s *Server) applySattr(path string, id uint64, a sattr3) error {
+func (s *Server) applySattr(ctx context.Context, path string, id uint64, a sattr3) error {
 	if a.setSize {
-		h, release, err := s.files.acquire(s.ctx, id, path, true)
+		h, release, err := s.files.acquire(ctx, id, path, true)
 		if err != nil {
 			return err
 		}
-		err = h.Truncate(s.ctx, int64(a.size))
+		err = h.Truncate(ctx, int64(a.size))
 		release()
 		if err != nil {
 			return err
@@ -258,7 +258,7 @@ func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 	}
 	if a.setMode {
 		if cp, ok := simplefs.As[simplefs.ChmodProvider](s.p); ok {
-			if err := cp.Chmod(s.ctx, path, simplefs.FileMode(a.mode)); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
+			if err := cp.Chmod(ctx, path, simplefs.FileMode(a.mode)); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
 				return err
 			}
 		}
@@ -272,7 +272,7 @@ func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 			if a.setGID {
 				gid = int(a.gid)
 			}
-			if err := cp.Chown(s.ctx, path, uid, gid); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
+			if err := cp.Chown(ctx, path, uid, gid); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
 				return err
 			}
 		}
@@ -289,7 +289,7 @@ func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 			}
 			// A timestamp the client did not set stays zero, which
 			// ChtimesProvider defines as "leave unchanged".
-			if err := tp.Chtimes(s.ctx, path, atime, mtime); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
+			if err := tp.Chtimes(ctx, path, atime, mtime); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
 				return err
 			}
 		}

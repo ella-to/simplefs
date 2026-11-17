@@ -5,12 +5,14 @@ package nfs
 // number to the PORTMAP, MOUNT, NFS, and NLM implementations.
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 )
 
 // RPC program numbers served.
@@ -44,6 +46,7 @@ const (
 // rpcCall is one decoded RPC call: header fields plus a reader positioned at
 // the start of the procedure arguments.
 type rpcCall struct {
+	ctx  context.Context // cancelled with the connection or server
 	xid  uint32
 	prog uint32
 	vers uint32
@@ -111,7 +114,7 @@ func replyRPCMismatch(xid uint32) []byte {
 
 // dispatch routes one RPC message to the program implementation and returns
 // the encoded reply (nil to send nothing).
-func (s *Server) dispatch(msg []byte) []byte {
+func (s *Server) dispatch(ctx context.Context, msg []byte) []byte {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 	c, err := decodeCall(msg)
@@ -124,7 +127,13 @@ func (s *Server) dispatch(msg []byte) []byte {
 	if err != nil {
 		return replyRPCMismatch(c.xid)
 	}
-	if s.log.Enabled(s.ctx, slog.LevelDebug) {
+	if s.opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.opts.Timeout)
+		defer cancel()
+	}
+	c.ctx = ctx
+	if s.log.Enabled(ctx, slog.LevelDebug) {
 		s.log.Debug("nfs: call", "xid", c.xid, "prog", c.prog, "vers", c.vers, "proc", c.proc)
 	}
 	switch c.prog {
@@ -161,11 +170,16 @@ const maxRecord = maxIO + 4096
 // fragments), dispatches each call on its own goroutine, and serializes the
 // replies. NFS clients pipeline requests, so concurrent handling matters.
 func (s *Server) serveConn(conn net.Conn) {
+	ctx, cancel := context.WithCancel(s.ctx)
 	var reqs sync.WaitGroup
 	defer func() {
+		cancel() // abandon in-flight provider calls of a vanished client
 		conn.Close()
 		reqs.Wait()
 	}()
+	// sem bounds concurrent requests per connection: when it is full the
+	// reader stops, so a client cannot queue unbounded work.
+	sem := make(chan struct{}, s.maxInFlight())
 	var wmu sync.Mutex
 	var hdr [4]byte
 	for {
@@ -188,10 +202,11 @@ func (s *Server) serveConn(conn net.Conn) {
 				break
 			}
 		}
+		sem <- struct{}{}
 		reqs.Add(1)
 		go func(msg []byte) {
-			defer reqs.Done()
-			reply := s.dispatch(msg)
+			defer func() { <-sem; reqs.Done() }()
+			reply := s.dispatch(ctx, msg)
 			if reply == nil {
 				return
 			}
@@ -199,10 +214,25 @@ func (s *Server) serveConn(conn net.Conn) {
 			binary.BigEndian.PutUint32(out, 0x80000000|uint32(len(reply)))
 			copy(out[4:], reply)
 			wmu.Lock()
-			conn.Write(out)
+			conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			_, err := conn.Write(out)
 			wmu.Unlock()
+			if err != nil {
+				conn.Close() // a client that stopped reading is gone
+			}
 		}(record)
 	}
+}
+
+// writeTimeout bounds how long a reply may take to send.
+const writeTimeout = 30 * time.Second
+
+// maxInFlight is Options.MaxInFlight, defaulted.
+func (s *Server) maxInFlight() int {
+	if s.opts.MaxInFlight > 0 {
+		return s.opts.MaxInFlight
+	}
+	return 64
 }
 
 // servePacket handles a UDP socket: one datagram per call, one per reply.
@@ -228,7 +258,7 @@ func (s *Server) servePacket(pc net.PacketConn) error {
 		reqs.Add(1)
 		go func(msg []byte, addr net.Addr) {
 			defer reqs.Done()
-			if reply := s.dispatch(msg); reply != nil {
+			if reply := s.dispatch(s.ctx, msg); reply != nil {
 				pc.WriteTo(reply, addr)
 			}
 		}(msg, addr)
