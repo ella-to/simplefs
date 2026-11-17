@@ -27,6 +27,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -50,14 +51,13 @@ func main() {
 	provider := memfs.New()
 
 	if *mountPath != "" {
-		mount.Register(provider)
-		real, err := mount.Mount("to.ella.simplefs.nfs", "SimpleFS")
+		m, err := mount.Mount(context.Background(), provider, mount.Options{Path: *mountPath})
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("mounted at %s — Ctrl-C to unmount\n", real)
+		fmt.Printf("mounted at %s — Ctrl-C to unmount\n", m.Path())
 		wait()
-		if err := mount.Unmount("to.ella.simplefs.nfs"); err != nil {
+		if err := m.Close(); err != nil {
 			log.Fatal(err)
 		}
 		return
