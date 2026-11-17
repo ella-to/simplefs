@@ -423,3 +423,21 @@ func TestStatFSTracksUsage(t *testing.T) {
 		t.Fatalf("used after recursive remove = %d, want 10", got)
 	}
 }
+
+func TestHandleStatFollowsRename(t *testing.T) {
+	ctx := t.Context()
+	m := New()
+	m.Mkdir(ctx, "/a", simplefs.MkdirOptions{})
+	h, err := m.Create(ctx, "/a/f", simplefs.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := m.Rename(ctx, "/a", "/b", simplefs.RenameOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := h.Stat(ctx)
+	if err != nil || info.Path != "/b/f" || info.Name != "f" {
+		t.Fatalf("Stat after rename = %+v, %v; want /b/f", info, err)
+	}
+}

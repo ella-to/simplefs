@@ -95,6 +95,9 @@ type MemFS struct {
 	// usedBytes is the total file content of every linked node, kept up to
 	// date on each change so StatFS is O(1).
 	usedBytes int64
+
+	// handles is every open handle, so Rename can keep their paths current.
+	handles map[*handle]struct{}
 }
 
 var (
@@ -121,7 +124,15 @@ func New() *MemFS {
 			nlink:    1,
 		},
 		watchers: map[*watcher]struct{}{},
+		handles:  map[*handle]struct{}{},
 	}
+}
+
+// openHandleLocked registers a new handle. Callers must hold m.mu for writing.
+func (m *MemFS) openHandleLocked(n *node, path string, opts simplefs.OpenOptions) *handle {
+	h := &handle{m: m, n: n, path: path, opts: opts}
+	m.handles[h] = struct{}{}
+	return h
 }
 
 // setDataLocked replaces n's content, keeping usedBytes current. Content of
@@ -269,7 +280,7 @@ func (m *MemFS) Open(ctx context.Context, path string, opts simplefs.OpenOptions
 		n.bump()
 		m.event(simplefs.EventModify, p, "", n)
 	}
-	return &handle{m: m, n: n, path: p, opts: opts}, nil
+	return m.openHandleLocked(n, p, opts), nil
 }
 
 // createFileLocked inserts a new empty file node at p. Callers must hold m.mu
@@ -321,7 +332,7 @@ func (m *MemFS) Create(ctx context.Context, path string, opts simplefs.CreateOpt
 	default:
 		return nil, patherr("create", p, err)
 	}
-	return &handle{m: m, n: n, path: p, opts: simplefs.OpenOptions{Read: true, Write: true}}, nil
+	return m.openHandleLocked(n, p, simplefs.OpenOptions{Read: true, Write: true}), nil
 }
 
 // ReadDir lists the directory at path. Pagination: entries are sorted by
@@ -487,6 +498,14 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 	dstParent.children[dstName] = src
 	if replacing {
 		m.unlinkLocked(dst)
+	}
+	for h := range m.handles {
+		switch {
+		case h.path == op:
+			h.path = np
+		case strings.HasPrefix(h.path, op+"/"):
+			h.path = np + h.path[len(op):]
+		}
 	}
 	now := time.Now()
 	srcParent.modTime, dstParent.modTime = now, now
@@ -784,6 +803,8 @@ func (h *handle) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
+// Stat returns the file's current metadata, reporting the path it has now
+// (after any renames since it was opened).
 func (h *handle) Stat(ctx context.Context) (simplefs.FileInfo, error) {
 	h.m.mu.RLock()
 	defer h.m.mu.RUnlock()
@@ -839,5 +860,8 @@ func (h *handle) Close() error {
 		return patherr("close", h.path, simplefs.ErrClosed)
 	}
 	h.closed = true
+	h.m.mu.Lock()
+	delete(h.m.handles, h)
+	h.m.mu.Unlock()
 	return nil
 }
