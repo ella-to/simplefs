@@ -1,0 +1,1 @@
+embedded with go:embed
