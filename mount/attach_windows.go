@@ -5,19 +5,56 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 
+	"ella.to/simplefs"
+	"ella.to/simplefs/memfs"
 	"ella.to/simplefs/nfs"
 )
 
-// nfsPlatform: mount.exe always talks to port 2049 and discovers the MOUNT
-// program through the portmapper on 111, so neither port is configurable.
-// Windows lets unprivileged processes bind low ports. Until the server can
-// export several providers, one process (and one machine) can therefore
-// hold a single NFS mount at a time.
-func nfsPlatform(o *nfs.Options) string {
-	o.Portmap = true
-	return "127.0.0.1:2049"
+// mount.exe always talks to port 2049 and discovers the MOUNT program
+// through the portmapper on 111, so neither port is configurable (Windows
+// lets unprivileged processes bind low ports). All mounts of a process
+// therefore share one server, each provider as its own export; the server
+// stops with the last mount. The options of the first mount configure it.
+var shared struct {
+	sync.Mutex
+	srv  *nfs.Server
+	refs int
+	seq  int
+}
+
+func serveNFS(p simplefs.FileProvider, o nfs.Options, name string) (served, error) {
+	shared.Lock()
+	defer shared.Unlock()
+	if shared.srv == nil {
+		o.Portmap = true
+		srv := nfs.NewServer(simplefs.ReadOnly(memfs.New()), o) // empty root export
+		if err := srv.Start("127.0.0.1:2049"); err != nil {
+			return served{}, fmt.Errorf("%w (is another NFS server using port 2049 or 111?)", err)
+		}
+		shared.srv = srv
+	}
+	shared.seq++
+	export := fmt.Sprintf("%s-%d", name, shared.seq)
+	if err := shared.srv.Export(export, p); err != nil {
+		return served{}, err
+	}
+	shared.refs++
+	srv := shared.srv
+	return served{port: srv.Port(), export: export, stop: func(ctx context.Context) error {
+		err := srv.Unexport(export)
+		shared.Lock()
+		defer shared.Unlock()
+		if shared.refs--; shared.refs == 0 && shared.srv == srv {
+			shared.srv = nil
+			if serr := srv.Shutdown(ctx); err == nil {
+				err = serr
+			}
+		}
+		return err
+	}}, nil
 }
 
 // autoBackend prefers NFS, and falls back to WebDAV on editions without
@@ -54,9 +91,8 @@ func drive(p string) (string, error) {
 	return l + ":", nil
 }
 
-// attachNFS maps the loopback server to a drive letter with the built-in
-// Client for NFS. The UNC share name is arbitrary: the server exports a
-// single root.
+// attachNFS maps the mount's export to a drive letter with the built-in
+// Client for NFS.
 func attachNFS(ctx context.Context, cfg attachConfig) (string, func(), error) {
 	if _, err := exec.LookPath("mount.exe"); err != nil {
 		return "", nil, fmt.Errorf("%w: mount.exe not found — enable \"Client for NFS\" "+
@@ -78,7 +114,7 @@ func attachNFS(ctx context.Context, cfg attachConfig) (string, func(), error) {
 	if cfg.readOnly {
 		opts += ",fileaccess=444"
 	}
-	out, err := exec.CommandContext(ctx, "mount.exe", "-o", opts, `\\127.0.0.1\`+cfg.name, letter).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "mount.exe", "-o", opts, `\\127.0.0.1\`+cfg.export, letter).CombinedOutput()
 	if err != nil {
 		return "", nil, fmt.Errorf("mount: mount.exe %s: %s: %w", letter, strings.TrimSpace(string(out)), err)
 	}

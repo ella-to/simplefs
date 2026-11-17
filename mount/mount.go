@@ -109,12 +109,10 @@ type Options struct {
 
 // Point is an active mount. Its methods are safe for concurrent use.
 type Point struct {
-	path   string
-	name   string
-	log    *slog.Logger
-	server interface {
-		Shutdown(context.Context) error
-	}
+	path    string
+	name    string
+	log     *slog.Logger
+	stop    func(context.Context) error // stops serving the provider
 	detach  func() error
 	cleanup func() // removes an auto-created mount directory
 
@@ -137,7 +135,7 @@ func (m *Point) Unmount(ctx context.Context) error {
 	m.once.Do(func() {
 		defer close(m.done)
 		err := m.detach()
-		if serr := m.server.Shutdown(ctx); err == nil && serr != nil && !errors.Is(serr, nfs.ErrServerClosed) {
+		if serr := m.stop(ctx); err == nil && serr != nil && !errors.Is(serr, nfs.ErrServerClosed) {
 			err = serr
 		}
 		if m.cleanup != nil {
@@ -187,6 +185,7 @@ func Mount(ctx context.Context, p simplefs.FileProvider, opts Options) (*Point, 
 // attachConfig is what a platform's attach function needs.
 type attachConfig struct {
 	port     int    // loopback port of the server
+	export   string // export name on the server ("/" for the root export)
 	path     string // requested mount path; empty = choose one
 	name     string
 	readOnly bool
@@ -211,32 +210,39 @@ func mountNFS(ctx context.Context, p simplefs.FileProvider, opts Options) (*Poin
 	if nopts.AttrCacheTTL == 0 {
 		nopts.AttrCacheTTL = time.Second // matches the client's actimeo=1
 	}
-	addr := nfsPlatform(&nopts)
 
-	srv := nfs.NewServer(p, nopts)
-	if err := srv.Start(addr); err != nil {
+	srv, err := serveNFS(p, nopts, opts.Name)
+	if err != nil {
 		return nil, fmt.Errorf("mount: start NFS server: %w", err)
 	}
 	target, cleanup, err := attachNFS(ctx, attachConfig{
-		port:     srv.Port(),
+		port:     srv.port,
+		export:   srv.export,
 		path:     opts.Path,
 		name:     opts.Name,
 		readOnly: opts.ReadOnly,
 	})
 	if err != nil {
-		srv.Close()
+		srv.stop(context.Background())
 		return nil, err
 	}
-	opts.Logger.Info("mount: mounted", "name", opts.Name, "path", target, "backend", "nfs", "port", srv.Port())
+	opts.Logger.Info("mount: mounted", "name", opts.Name, "path", target, "backend", "nfs", "port", srv.port)
 	return &Point{
 		path:    target,
 		name:    opts.Name,
 		log:     opts.Logger,
-		server:  srv,
+		stop:    srv.stop,
 		detach:  func() error { return detachNFS(target) },
 		cleanup: cleanup,
 		done:    make(chan struct{}),
 	}, nil
+}
+
+// served describes a running NFS export for one mount.
+type served struct {
+	port   int
+	export string
+	stop   func(context.Context) error
 }
 
 // currentIDs returns the calling user's uid and gid (0 where the OS has
