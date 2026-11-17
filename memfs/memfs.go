@@ -95,6 +95,7 @@ type MemFS struct {
 	// usedBytes is the total file content of every linked node, kept up to
 	// date on each change so StatFS is O(1).
 	usedBytes int64
+	capacity  int64
 
 	// handles is every open handle, so Rename can keep their paths current.
 	handles map[*handle]struct{}
@@ -112,9 +113,22 @@ var (
 	_ simplefs.WatchProvider    = (*MemFS)(nil)
 )
 
+// DefaultCapacity is the content limit of a filesystem created without
+// WithCapacity.
+const DefaultCapacity = 1 << 30
+
+// Option configures a MemFS.
+type Option func(*MemFS)
+
+// WithCapacity limits the total file content to n bytes; writes that would
+// exceed it fail with simplefs.ErrNoSpace. StatFS reports this capacity.
+func WithCapacity(n int64) Option {
+	return func(m *MemFS) { m.capacity = n }
+}
+
 // New returns an empty in-memory filesystem.
-func New() *MemFS {
-	return &MemFS{
+func New(opts ...Option) *MemFS {
+	m := &MemFS{
 		root: &node{
 			typ:      simplefs.TypeDirectory,
 			mode:     0o755,
@@ -125,7 +139,19 @@ func New() *MemFS {
 		},
 		watchers: map[*watcher]struct{}{},
 		handles:  map[*handle]struct{}{},
+		capacity: DefaultCapacity,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// reserveLocked reports whether n's content may grow to size bytes without
+// exceeding the capacity. Callers must hold m.mu.
+func (m *MemFS) reserveLocked(n *node, size int64) bool {
+	grow := size - int64(len(n.data))
+	return grow <= 0 || m.usedBytes+grow <= m.capacity
 }
 
 // openHandleLocked registers a new handle. Callers must hold m.mu for writing.
@@ -682,16 +708,16 @@ func (m *MemFS) RemoveXattr(ctx context.Context, path, name string) error {
 	return nil
 }
 
-// StatFS reports capacity for a pretend 1 GiB volume, with usage derived from
-// the bytes currently stored.
+// StatFS reports the configured capacity (see WithCapacity), with usage
+// derived from the bytes currently stored.
 func (m *MemFS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
 	m.mu.RLock()
 	usedBytes := uint64(m.usedBytes)
 	m.mu.RUnlock()
 
-	const totalBlocks = (1 << 30) / blockSize
+	totalBlocks := uint64(m.capacity) / blockSize
 	used := (usedBytes + blockSize - 1) / blockSize
-	free := uint64(totalBlocks)
+	free := totalBlocks
 	if used < free {
 		free -= used
 	} else {
@@ -793,7 +819,11 @@ func (h *handle) WriteAt(p []byte, off int64) (int, error) {
 	if h.opts.Append {
 		off = int64(len(h.n.data))
 	}
-	if end := off + int64(len(p)); end > int64(len(h.n.data)) {
+	end := off + int64(len(p))
+	if end < off || !h.m.reserveLocked(h.n, end) {
+		return 0, patherr("write", h.path, simplefs.ErrNoSpace)
+	}
+	if end > int64(len(h.n.data)) {
 		h.m.setDataLocked(h.n, resize(h.n.data, end))
 	}
 	copy(h.n.data[off:], p)
@@ -825,6 +855,9 @@ func (h *handle) Truncate(ctx context.Context, size int64) error {
 
 	if size == int64(len(h.n.data)) {
 		return nil
+	}
+	if !h.m.reserveLocked(h.n, size) {
+		return patherr("truncate", h.path, simplefs.ErrNoSpace)
 	}
 	h.m.setDataLocked(h.n, resize(h.n.data, size))
 	h.n.modTime = time.Now()

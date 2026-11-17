@@ -108,6 +108,8 @@ func CodeOf(err error) (Code, string) {
 		return CodeNameConflict, err.Error()
 	case errors.Is(err, simplefs.ErrPermission):
 		return CodeNotPermitted, err.Error()
+	case errors.Is(err, simplefs.ErrNoSpace):
+		return CodeQuota, err.Error()
 	case errors.Is(err, simplefs.ErrNotSupported), errors.Is(err, simplefs.ErrIsDir), errors.Is(err, simplefs.ErrNotDir):
 		return CodeUnsupported, err.Error()
 	default:

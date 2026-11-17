@@ -441,3 +441,29 @@ func TestHandleStatFollowsRename(t *testing.T) {
 		t.Fatalf("Stat after rename = %+v, %v; want /b/f", info, err)
 	}
 }
+
+func TestCapacity(t *testing.T) {
+	ctx := t.Context()
+	m := New(WithCapacity(100))
+	h, err := m.Create(ctx, "/f", simplefs.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if _, err := h.WriteAt(make([]byte, 100), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.WriteAt([]byte{1}, 100); !errors.Is(err, simplefs.ErrNoSpace) {
+		t.Fatalf("write past capacity = %v, want ErrNoSpace", err)
+	}
+	if err := h.Truncate(ctx, 1<<62); !errors.Is(err, simplefs.ErrNoSpace) {
+		t.Fatalf("huge truncate = %v, want ErrNoSpace", err)
+	}
+	if _, err := h.WriteAt([]byte{1}, 1<<63-1); !errors.Is(err, simplefs.ErrNoSpace) {
+		t.Fatalf("overflowing write = %v, want ErrNoSpace", err)
+	}
+	fsinfo, _ := m.StatFS(ctx)
+	if fsinfo.Blocks*fsinfo.BlockSize > 100 {
+		t.Fatalf("StatFS reports %d bytes, capacity is 100", fsinfo.Blocks*fsinfo.BlockSize)
+	}
+}

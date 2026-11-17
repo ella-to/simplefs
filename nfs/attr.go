@@ -65,6 +65,8 @@ func statusOf(err error) uint32 {
 		return nfsErrNotSupp
 	case errors.Is(err, simplefs.ErrInvalid):
 		return nfsErrInval
+	case errors.Is(err, simplefs.ErrNoSpace):
+		return nfsErrNoSpc
 	default:
 		return nfsErrIO
 	}

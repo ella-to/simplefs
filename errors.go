@@ -34,6 +34,10 @@ var (
 
 	// ErrClosed indicates a FileHandle was used after Close.
 	ErrClosed = errors.New("file already closed")
+
+	// ErrNoSpace indicates the provider has no room for the data (disk
+	// full, quota exceeded).
+	ErrNoSpace = errors.New("no space left on device")
 )
 
 // PathError records an error, the operation, and the path that caused it —
