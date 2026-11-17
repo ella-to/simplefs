@@ -62,8 +62,34 @@ func checkName(name string) uint32 {
 	return statusOf(simplefs.ValidName(name))
 }
 
+// mutating reports whether an NFSv3 procedure changes the filesystem.
+func mutating(proc uint32) bool {
+	switch proc {
+	case nfsProcSetattr, nfsProcWrite, nfsProcCreate, nfsProcMkdir, nfsProcSymlink,
+		nfsProcMknod, nfsProcRemove, nfsProcRmdir, nfsProcRename, nfsProcLink, nfsProcCommit:
+		return true
+	}
+	return false
+}
+
 func (s *Server) nfsProc(c *rpcCall) []byte {
 	w := replyHeader(c.xid, acceptSuccess)
+	if s.opts.ReadOnly && mutating(c.proc) {
+		// Every mutating result begins with nfsstat3 followed by wcc_data
+		// (RENAME has two, LINK a post_op_attr and a wcc_data).
+		w.uint32(nfsErrROFS)
+		switch c.proc {
+		case nfsProcRename:
+			wccNone(w)
+			wccNone(w)
+		case nfsProcLink:
+			postOpNone(w)
+			wccNone(w)
+		default:
+			wccNone(w)
+		}
+		return w.bytes()
+	}
 	switch c.proc {
 	case nfsProcNull:
 	case nfsProcGetattr:

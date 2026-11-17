@@ -112,6 +112,8 @@ func replyRPCMismatch(xid uint32) []byte {
 // dispatch routes one RPC message to the program implementation and returns
 // the encoded reply (nil to send nothing).
 func (s *Server) dispatch(msg []byte) []byte {
+	s.inflight.Add(1)
+	defer s.inflight.Add(-1)
 	c, err := decodeCall(msg)
 	if c == nil {
 		if err != nil {

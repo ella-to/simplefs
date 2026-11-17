@@ -57,6 +57,10 @@ type Options struct {
 	// generic I/O error. Nil discards them.
 	Logger *slog.Logger
 
+	// ReadOnly rejects every mutating procedure with NFS3ERR_ROFS before
+	// it reaches the provider, and makes ACCESS deny write rights.
+	ReadOnly bool
+
 	// HandleIdle is how long an open provider handle stays cached after its
 	// last READ/WRITE before it is closed. Zero means 5s.
 	HandleIdle time.Duration
@@ -94,6 +98,9 @@ type Server struct {
 	conns     map[net.Conn]struct{}
 	closed    bool
 	done      chan struct{}
+
+	// inflight counts RPCs being processed, for Shutdown.
+	inflight atomic.Int64
 
 	// wg counts the serving goroutines (accept loops, packet loops, and
 	// connections); Close waits for it so no handler outlives the server.
@@ -138,7 +145,7 @@ func (s *Server) statFS() (simplefs.FSInfo, bool) {
 }
 
 // readOnly reports whether the export must be treated as read-only.
-func (s *Server) readOnly() bool { return s.fsReadOnly.Load() }
+func (s *Server) readOnly() bool { return s.opts.ReadOnly || s.fsReadOnly.Load() }
 
 // Provider returns the wrapped simplefs.FileProvider.
 func (s *Server) Provider() simplefs.FileProvider { return s.p }
@@ -327,6 +334,35 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 			s.serveConn(conn)
 		}()
 	}
+}
+
+// Shutdown gracefully stops the server: it stops accepting connections and
+// datagrams, waits for in-flight RPCs to finish (or ctx to end), then closes
+// everything like Close, syncing cached write handles first. It returns
+// ctx.Err() if ctx ended before the RPCs drained.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	lns := s.listeners
+	s.listeners = nil
+	s.mu.Unlock()
+	for _, ln := range lns {
+		ln.Close()
+	}
+
+	t := time.NewTicker(5 * time.Millisecond)
+	defer t.Stop()
+	var err error
+	for s.inflight.Load() > 0 && err == nil {
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-t.C:
+		}
+	}
+	if cerr := s.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // Close immediately stops all listeners, closes every accepted connection,

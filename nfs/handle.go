@@ -190,8 +190,9 @@ func (c *openCache) sweep() {
 	}
 }
 
-// shutdown stops the sweeper and closes every cached handle. Handles still
-// in use are closed by their last release.
+// shutdown stops the sweeper and closes every cached handle, syncing write
+// handles first so unstable writes reach the provider. Handles still in use
+// are closed by their last release.
 func (c *openCache) shutdown() {
 	c.mu.Lock()
 	if c.closed {
@@ -212,6 +213,7 @@ func (c *openCache) shutdown() {
 	close(c.stop)
 	<-c.done
 	for _, h := range toClose {
+		h.Sync(context.Background())
 		h.Close()
 	}
 }

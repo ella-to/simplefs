@@ -698,3 +698,49 @@ func TestAccessHonoursMode(t *testing.T) {
 		t.Fatalf("ACCESS = %#x, want READ only", got)
 	}
 }
+
+func TestReadOnlyOption(t *testing.T) {
+	p := memfs.New()
+	simplefs.WriteFile(t.Context(), p, "/f", []byte("data"), 0)
+	_, c := startServerWith(t, p, Options{ReadOnly: true})
+	root := c.mnt()
+	fh := c.lookup(root, "f", nfsOK)
+	data, _ := c.read(fh, 0, 10)
+	if string(data) != "data" {
+		t.Fatalf("read = %q", data)
+	}
+	args := newWriter()
+	args.opaque(root)
+	args.string("new")
+	args.uint32(createUnchecked)
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.uint32(0)
+	args.uint32(0)
+	c.nfsCall(nfsProcCreate, args, nfsErrROFS)
+
+	args = newWriter()
+	args.opaque(fh)
+	args.uint32(accessRead | accessModify)
+	r := c.nfsCall(nfsProcAccess, args, nfsOK)
+	skipPostOpAttr(r)
+	if got := r.uint32(); got != accessRead {
+		t.Fatalf("ACCESS on read-only export = %#x, want READ", got)
+	}
+}
+
+func TestShutdownWaitsAndSyncs(t *testing.T) {
+	srv := NewServer(memfs.New(), Options{})
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	addr := srv.Addr().String()
+	if err := srv.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := net.Dial("tcp", addr); err == nil {
+		t.Fatal("still accepting after Shutdown")
+	}
+}
