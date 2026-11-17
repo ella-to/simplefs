@@ -202,34 +202,27 @@ func (b *Bridge) ReadDir(parentID string) ([]Item, error) {
 		return nil, err
 	}
 	var items []Item
-	token := ""
-	for {
-		page, err := b.p.ReadDir(b.ctx, parent, simplefs.Page{Limit: 512, Token: token})
+	for e, err := range simplefs.Entries(b.ctx, b.p, parent) {
 		if err != nil {
 			return nil, wrapErr(err)
 		}
-		for _, e := range page.Entries {
-			childPath := simplefs.JoinPath(parent, e.Name)
-			info := simplefs.FileInfo{}
-			if e.Info != nil {
-				info = *e.Info
-				info.Path = childPath
-			} else {
-				info, err = b.p.Stat(b.ctx, childPath)
-				if errors.Is(err, simplefs.ErrNotExist) {
-					continue // entry vanished between ReadDir and Stat
-				}
-				if err != nil {
-					return nil, wrapErr(err)
-				}
+		childPath := simplefs.JoinPath(parent, e.Name)
+		var info simplefs.FileInfo
+		if e.Info != nil {
+			info = *e.Info
+			info.Path = childPath
+		} else {
+			info, err = b.p.Stat(b.ctx, childPath)
+			if errors.Is(err, simplefs.ErrNotExist) {
+				continue // entry vanished between ReadDir and Stat
 			}
-			items = append(items, b.item(info, b.idFor(childPath)))
+			if err != nil {
+				return nil, wrapErr(err)
+			}
 		}
-		if page.NextToken == "" {
-			return items, nil
-		}
-		token = page.NextToken
+		items = append(items, b.item(info, b.idFor(childPath)))
 	}
+	return items, nil
 }
 
 // Open returns a reader over the file's full content, backed by the

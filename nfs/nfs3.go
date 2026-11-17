@@ -621,27 +621,20 @@ func (s *Server) listDir(dir string, dirID uint64) ([]dirEntry, error) {
 		{name: ".", path: dir, id: dirID},
 		{name: "..", path: parent, id: s.fh.id(parent)},
 	}
-	token := ""
-	for {
-		page, err := s.p.ReadDir(s.ctx, dir, simplefs.Page{Limit: 512, Token: token})
+	for e, err := range simplefs.Entries(s.ctx, s.p, dir) {
 		if err != nil {
 			return nil, err
 		}
-		for _, e := range page.Entries {
-			childPath := simplefs.JoinPath(dir, e.Name)
-			de := dirEntry{name: e.Name, path: childPath, id: s.fh.id(childPath)}
-			if e.Info != nil {
-				info := *e.Info
-				info.Path = childPath
-				de.info = &info
-			}
-			entries = append(entries, de)
+		childPath := simplefs.JoinPath(dir, e.Name)
+		de := dirEntry{name: e.Name, path: childPath, id: s.fh.id(childPath)}
+		if e.Info != nil {
+			info := *e.Info
+			info.Path = childPath
+			de.info = &info
 		}
-		if page.NextToken == "" {
-			return entries, nil
-		}
-		token = page.NextToken
+		entries = append(entries, de)
 	}
+	return entries, nil
 }
 
 func (s *Server) opReaddir(r *xdrReader, w *xdrWriter, plus bool) {
