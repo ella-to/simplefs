@@ -17,19 +17,21 @@ package simplefs
 import (
 	"context"
 	"io"
+	"io/fs"
 	"time"
 )
 
-// FileType describes the type of an entry.
+// FileType describes the type of an entry. The zero value is unknown.
 //
-// This intentionally avoids exposing platform-specific concepts. The mount
-// implementation (File Provider, FUSE, WinFsp, ...) is responsible for
-// translating these into native file types.
-type FileType uint32
+// This intentionally avoids exposing platform-specific concepts. The backend
+// (NFS server, File Provider, ...) is responsible for translating these into
+// native file types.
+type FileType uint8
 
+// The supported file types.
 const (
-	TypeFile FileType = 1 << iota
-	TypeDirectory
+	TypeFile FileType = iota + 1
+	TypeDir
 	TypeSymlink
 )
 
@@ -37,17 +39,18 @@ const (
 func (t FileType) IsFile() bool { return t == TypeFile }
 
 // IsDir reports whether the type is a directory.
-func (t FileType) IsDir() bool { return t == TypeDirectory }
+func (t FileType) IsDir() bool { return t == TypeDir }
 
 // IsSymlink reports whether the type is a symbolic link.
 func (t FileType) IsSymlink() bool { return t == TypeSymlink }
 
+// String returns "file", "dir", "symlink", or "unknown".
 func (t FileType) String() string {
 	switch t {
 	case TypeFile:
 		return "file"
-	case TypeDirectory:
-		return "directory"
+	case TypeDir:
+		return "dir"
 	case TypeSymlink:
 		return "symlink"
 	default:
@@ -55,42 +58,43 @@ func (t FileType) String() string {
 	}
 }
 
-// FileMode holds Unix-style permission bits (e.g. 0o644). It is intentionally
-// similar to os.FileMode's permission subset without depending on os.
-type FileMode uint32
+// FileMode holds permission bits (e.g. 0o644). It is io/fs.FileMode, but a
+// FileInfo.Mode carries only the permission bits: the type lives in
+// FileInfo.Type.
+type FileMode = fs.FileMode
 
 // FileInfo describes a single filesystem object.
 //
-// Unlike os.FileInfo, this is a plain struct instead of an interface, making
-// it easier to serialize over RPC and cache.
+// Unlike io/fs.FileInfo, this is a plain struct instead of an interface,
+// which makes it easy to serialize over RPC and to cache.
 type FileInfo struct {
-	// Full logical path relative to the filesystem root.
-	// Always uses '/' as separator.
+	// Path is the full logical path, in CleanPath form. Providers must set
+	// it.
 	Path string
 
-	// Base name.
-	Name string
-
-	// File, Directory, Symlink...
+	// Type is file, directory, or symlink.
 	Type FileType
 
-	// Size in bytes.
+	// Size in bytes. For a symlink, the length of its target.
 	Size int64
 
-	// Permission bits.
+	// Mode holds the permission bits only.
 	Mode FileMode
 
-	// Last modification time.
+	// ModTime is the last modification time.
 	ModTime time.Time
 
-	// Optional opaque version identifier.
+	// ETag is an optional opaque version identifier.
 	//
 	// Useful for remote filesystems (S3, Dropbox, Google Drive, git,
-	// databases, etc.) for optimistic concurrency, and used by mounts to
-	// decide when cached content is stale. It should change whenever the
-	// object's content or metadata changes.
+	// databases, etc.) for optimistic concurrency, and used by backends to
+	// decide when cached content is stale. When non-empty it must change
+	// whenever the object's content or metadata changes.
 	ETag string
 }
+
+// Name returns the base name of the object (BaseName of Path).
+func (fi FileInfo) Name() string { return BaseName(fi.Path) }
 
 // IsDir reports whether the info describes a directory.
 func (fi FileInfo) IsDir() bool { return fi.Type.IsDir() }

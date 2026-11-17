@@ -54,7 +54,7 @@ func TestCreateWriteRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size != 5 || !info.Type.IsFile() || info.Name != "a.txt" || info.Path != "/a.txt" {
+	if info.Size != 5 || !info.Type.IsFile() || info.Name() != "a.txt" || info.Path != "/a.txt" {
 		t.Fatalf("unexpected info: %+v", info)
 	}
 }
@@ -438,7 +438,7 @@ func TestHandleStatFollowsRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := h.Stat(ctx)
-	if err != nil || info.Path != "/b/f" || info.Name != "f" {
+	if err != nil || info.Path != "/b/f" || info.Name() != "f" {
 		t.Fatalf("Stat after rename = %+v, %v; want /b/f", info, err)
 	}
 }

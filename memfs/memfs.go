@@ -37,7 +37,7 @@ type node struct {
 	nlink   int // directory entries referring to this node
 
 	data     []byte           // TypeFile
-	children map[string]*node // TypeDirectory
+	children map[string]*node // TypeDir
 	target   string           // TypeSymlink
 }
 
@@ -53,7 +53,6 @@ func (n *node) size() int64 {
 func (n *node) info(path string) simplefs.FileInfo {
 	return simplefs.FileInfo{
 		Path:    path,
-		Name:    simplefs.BaseName(path),
 		Type:    n.typ,
 		Size:    n.size(),
 		Mode:    n.mode,
@@ -130,7 +129,7 @@ func WithCapacity(n int64) Option {
 func New(opts ...Option) *MemFS {
 	m := &MemFS{
 		root: &node{
-			typ:      simplefs.TypeDirectory,
+			typ:      simplefs.TypeDir,
 			mode:     0o755,
 			modTime:  time.Now(),
 			children: map[string]*node{},
@@ -425,7 +424,7 @@ func (m *MemFS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptio
 		return patherr("mkdir", p, simplefs.ErrExist)
 	}
 	n := &node{
-		typ:      simplefs.TypeDirectory,
+		typ:      simplefs.TypeDir,
 		mode:     mode,
 		modTime:  time.Now(),
 		children: map[string]*node{},

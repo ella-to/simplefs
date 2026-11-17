@@ -157,7 +157,7 @@ func (b *Bridge) item(info simplefs.FileInfo, id string) Item {
 	if info.Path != "/" {
 		parentID = b.idFor(simplefs.ParentPath(info.Path))
 	}
-	name := info.Name
+	name := info.Name()
 	if info.Path == "/" {
 		name = "root"
 	}

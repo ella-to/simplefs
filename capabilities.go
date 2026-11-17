@@ -83,16 +83,18 @@ type FSInfo struct {
 	ReadOnly      bool
 }
 
-// EventType identifies a filesystem event.
-type EventType uint32
+// EventType identifies a filesystem event. The zero value is unknown.
+type EventType uint8
 
+// The kinds of change a WatchProvider reports.
 const (
-	EventCreate EventType = 1 << iota
+	EventCreate EventType = iota + 1
 	EventDelete
 	EventModify
 	EventRename
 )
 
+// String returns "create", "delete", "modify", "rename", or "unknown".
 func (t EventType) String() string {
 	switch t {
 	case EventCreate:
@@ -110,12 +112,15 @@ func (t EventType) String() string {
 
 // Event is emitted by WatchProvider.
 type Event struct {
+	// Type is the kind of change.
 	Type EventType
 
+	// Path is the affected path (the destination, for a rename).
 	Path string
 
-	// Used for rename operations.
+	// OldPath is the source path of a rename; empty otherwise.
 	OldPath string
 
+	// Info is the object's metadata after the change, when available.
 	Info *FileInfo
 }
