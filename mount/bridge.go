@@ -2,6 +2,7 @@ package mount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -222,8 +223,11 @@ func (b *Bridge) ReadDir(parentID string) ([]Item, error) {
 				info.Path = childPath
 			} else {
 				info, err = b.p.Stat(b.ctx, childPath)
-				if err != nil {
+				if errors.Is(err, simplefs.ErrNotExist) {
 					continue // entry vanished between ReadDir and Stat
+				}
+				if err != nil {
+					return nil, wrapErr(err)
 				}
 			}
 			items = append(items, b.item(info, b.idFor(childPath)))
