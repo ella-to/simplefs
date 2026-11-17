@@ -24,6 +24,10 @@ jobs:
         run: go test -race ./...
       - name: cross-vet
         run: sh scripts/cross-vet.sh
+      - name: build examples
+        run: sh scripts/build-examples.sh
+      - name: real mounts (root)
+        run: sudo -E env "PATH=$PATH" go test -tags mounttest -count=1 ./mount/
       - name: docker end-to-end
         run: make docker-test
 
@@ -40,6 +44,10 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go vet ./... && go test ./...
+      - name: real mounts (mount_nfs as a normal user)
+        run: go test -tags mounttest -count=1 ./mount/
+      - name: File Provider bundle builds and signs
+        run: make all
 
   windows:
     runs-on: windows-latest
@@ -52,3 +60,24 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test ./...
+
+  windows-mount:
+    # Best effort: needs the "Client for NFS" feature, which hosted runners
+    # may not allow installing. See the guide for running this on a VM.
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: install Client for NFS
+        shell: pwsh
+        run: |
+          Install-WindowsFeature -Name NFS-Client -ErrorAction SilentlyContinue
+          if (-not (Get-Command mount.exe -ErrorAction SilentlyContinue)) {
+            Enable-WindowsOptionalFeature -Online -All -NoRestart `
+              -FeatureName ServicesForNFS-ClientOnly,ClientForNFS-Infrastructure
+          }
+      - name: real mounts
+        run: go test -tags mounttest -count=1 ./mount/
