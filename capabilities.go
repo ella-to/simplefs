@@ -5,12 +5,12 @@ import (
 	"time"
 )
 
-// Optional Capabilities
+// Optional capabilities.
 //
-// A provider advertises a capability by implementing the interface; mounts
-// discover them with type assertions:
+// A provider advertises a capability by implementing the interface; backends
+// discover them with As, which also looks through middleware:
 //
-//	if sp, ok := provider.(fs.SymlinkProvider); ok { ... }
+//	if sp, ok := simplefs.As[simplefs.SymlinkProvider](provider); ok { ... }
 //
 // A capability that is implemented but cannot serve a particular call should
 // return ErrNotSupported.
@@ -66,21 +66,24 @@ type StatFSProvider interface {
 
 // WatchProvider supports watching filesystem changes.
 //
-// The returned channel is closed when ctx is cancelled; cancel the context to
-// release the watch.
+// Watch reports changes to path itself and its direct children, or with
+// recursive to every descendant. The returned channel is closed when ctx is
+// cancelled; cancel the context to release the watch. Delivery must never
+// block the provider: a receiver that falls behind may miss events.
 type WatchProvider interface {
 	Watch(ctx context.Context, path string, recursive bool) (<-chan Event, error)
 }
 
-// FSInfo describes overall filesystem capacity.
+// FSInfo describes overall filesystem capacity. Counts are in blocks of
+// BlockSize bytes, and Available <= Free <= Blocks.
 type FSInfo struct {
-	BlockSize uint64
-	Blocks    uint64
-	Free      uint64
-	Available uint64
+	BlockSize uint64 // bytes per block
+	Blocks    uint64 // total blocks
+	Free      uint64 // free blocks
+	Available uint64 // free blocks usable by unprivileged users
 
-	MaxNameLength uint32
-	ReadOnly      bool
+	MaxNameLength uint32 // longest path element, in bytes; 0 = unknown
+	ReadOnly      bool   // all mutations fail with ErrReadOnly
 }
 
 // EventType identifies a filesystem event. The zero value is unknown.
