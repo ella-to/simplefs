@@ -1,0 +1,56 @@
+# A simplefs NFS server in one container, consumed by another container as
+# a named Docker volume — no FUSE, and the server needs no privileges.
+#
+#   docker compose -f examples/docker/compose.yaml up --build
+#
+# The client writes a file, the server keeps it in memory, and the client
+# lists it back. Run `docker compose ... down -v` afterwards.
+#
+# Volume options: Docker's built-in "local" driver mounts NFS itself (the
+# Docker daemon/VM does the mount, so addr must be reachable from it). On
+# Docker Desktop, OrbStack and Colima use the server's address on the
+# compose network as below, never 127.0.0.1.
+name: simplefs-demo
+
+services:
+  nfs:
+    build:
+      context: ../..
+    image: simplefs-nfs
+    # Unprivileged. The image allows all clients by default (it has no
+    # authentication); keep the network private, or narrow --allow:
+    command: ["--addr", ":2049", "--allow", "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"]
+    networks:
+      net:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "2049"]
+      interval: 2s
+      retries: 15
+
+  client:
+    image: alpine:3.22
+    depends_on:
+      nfs:
+        condition: service_healthy
+    volumes:
+      - data:/data
+    command: >
+      sh -c 'echo "hello from $$(hostname)" > /data/hello.txt &&
+             mkdir -p /data/dir && cp /etc/os-release /data/dir/ &&
+             ls -la /data /data/dir && cat /data/hello.txt'
+    networks: [net]
+
+volumes:
+  data:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=172.28.0.10,port=2049,mountport=2049,vers=3,tcp,nolock,soft
+      device: ":/"
+
+networks:
+  net:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
