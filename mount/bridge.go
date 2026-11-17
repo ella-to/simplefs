@@ -100,17 +100,11 @@ func (b *Bridge) pathFor(id string) (string, error) {
 func (b *Bridge) rekey(oldPath, newPath string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	prefix := oldPath + "/"
 	for p, id := range b.byPath {
-		var moved string
-		switch {
-		case p == oldPath:
-			moved = newPath
-		case len(p) > len(prefix) && p[:len(prefix)] == prefix:
-			moved = newPath + p[len(oldPath):]
-		default:
+		if !simplefs.IsUnder(oldPath, p) {
 			continue
 		}
+		moved := newPath + p[len(oldPath):]
 		delete(b.byPath, p)
 		b.byPath[moved] = id
 		b.byID[id] = moved
@@ -121,9 +115,8 @@ func (b *Bridge) rekey(oldPath, newPath string) {
 func (b *Bridge) forget(path string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	prefix := path + "/"
 	for p, id := range b.byPath {
-		if p == path || (len(p) > len(prefix) && p[:len(prefix)] == prefix) {
+		if simplefs.IsUnder(path, p) {
 			delete(b.byPath, p)
 			delete(b.byID, id)
 		}
@@ -271,6 +264,9 @@ func (b *Bridge) Create(name, parentID string, dir bool, content []byte) (Item, 
 	if err != nil {
 		return Item{}, err
 	}
+	if err := simplefs.ValidName(name); err != nil {
+		return Item{}, wrapErr(err)
+	}
 	path := simplefs.JoinPath(parent, name)
 
 	var info simplefs.FileInfo
@@ -332,6 +328,9 @@ func (b *Bridge) Update(req UpdateRequest) (Item, error) {
 			}
 		}
 		if req.ChangedName {
+			if err := simplefs.ValidName(req.NewName); err != nil {
+				return Item{}, wrapErr(err)
+			}
 			name = req.NewName
 		}
 		if newPath := simplefs.JoinPath(dir, name); newPath != path {

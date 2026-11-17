@@ -11,7 +11,6 @@ package nfs
 import (
 	"context"
 	"encoding/binary"
-	"strings"
 	"sync"
 	"time"
 
@@ -71,17 +70,11 @@ func (t *fhTable) path(id uint64) (string, bool) {
 func (t *fhTable) rekey(oldPath, newPath string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	prefix := oldPath + "/"
 	for p, id := range t.byPath {
-		var moved string
-		switch {
-		case p == oldPath:
-			moved = newPath
-		case strings.HasPrefix(p, prefix):
-			moved = newPath + p[len(oldPath):]
-		default:
+		if !simplefs.IsUnder(oldPath, p) {
 			continue
 		}
+		moved := newPath + p[len(oldPath):]
 		delete(t.byPath, p)
 		t.byPath[moved] = id
 		t.byID[id] = moved
@@ -92,9 +85,8 @@ func (t *fhTable) rekey(oldPath, newPath string) {
 func (t *fhTable) forget(path string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	prefix := path + "/"
 	for p, id := range t.byPath {
-		if p == path || strings.HasPrefix(p, prefix) {
+		if simplefs.IsUnder(path, p) {
 			delete(t.byPath, p)
 			delete(t.byID, id)
 		}

@@ -7,7 +7,6 @@ package nfs
 import (
 	"errors"
 	"io"
-	"strings"
 
 	"ella.to/simplefs"
 )
@@ -60,13 +59,7 @@ func (s *Server) fhPath(r *xdrReader) (path string, id uint64, stat uint32) {
 
 // checkName validates one path component from the wire.
 func checkName(name string) uint32 {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") {
-		return nfsErrInval
-	}
-	if len(name) > 255 {
-		return nfsErrNameTooL
-	}
-	return nfsOK
+	return statusOf(simplefs.ValidName(name))
 }
 
 func (s *Server) nfsProc(c *rpcCall) []byte {

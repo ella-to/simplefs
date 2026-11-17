@@ -71,17 +71,10 @@ type watcher struct {
 // the watched path itself, a direct child, or — when recursive — any
 // descendant.
 func (w *watcher) matches(p string) bool {
-	if p == w.path {
-		return true
-	}
-	prefix := w.path + "/"
-	if w.path == "/" {
-		prefix = "/"
-	}
-	if !strings.HasPrefix(p, prefix) {
+	if !simplefs.IsUnder(w.path, p) {
 		return false
 	}
-	return w.recursive || !strings.Contains(p[len(prefix):], "/")
+	return w.recursive || p == w.path || simplefs.ParentPath(p) == w.path
 }
 
 // MemFS is an in-memory simplefs.FileProvider. The zero value is not usable; use
@@ -226,7 +219,11 @@ func (m *MemFS) walkParent(path string) (*node, string, error) {
 	if !parent.typ.IsDir() {
 		return nil, "", simplefs.ErrNotDir
 	}
-	return parent, simplefs.BaseName(p), nil
+	name := simplefs.BaseName(p)
+	if err := simplefs.ValidName(name); err != nil {
+		return nil, "", err
+	}
+	return parent, name, nil
 }
 
 // notify delivers ev to every matching watcher. Callers must hold m.mu (read
@@ -452,7 +449,7 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 	if op == np {
 		return nil
 	}
-	if strings.HasPrefix(np, op+"/") {
+	if simplefs.IsUnder(op, np) {
 		return patherr("rename", np, simplefs.ErrInvalid) // moving a directory into itself
 	}
 
@@ -493,10 +490,7 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 		m.unlinkLocked(dst)
 	}
 	for h := range m.handles {
-		switch {
-		case h.path == op:
-			h.path = np
-		case strings.HasPrefix(h.path, op+"/"):
+		if simplefs.IsUnder(op, h.path) {
 			h.path = np + h.path[len(op):]
 		}
 	}
