@@ -8,6 +8,7 @@
 package idtable
 
 import (
+	"container/list"
 	"strings"
 	"sync"
 )
@@ -19,6 +20,11 @@ type Table[ID comparable] struct {
 	root *node[ID]
 	byID map[ID]*node[ID]
 	next func() ID
+
+	// Optional bound (SetLimit): IDs in least-recently-used order.
+	limit int
+	keep  func(ID) bool
+	lru   list.List
 }
 
 type node[ID comparable] struct {
@@ -27,6 +33,7 @@ type node[ID comparable] struct {
 	children map[string]*node[ID]
 	id       ID
 	hasID    bool
+	elem     *list.Element // position in Table.lru while bounded
 }
 
 // New returns a table in which "/" has rootID; next generates the IDs of
@@ -68,6 +75,46 @@ func (t *Table[ID]) find(path string, create bool) *node[ID] {
 	return n
 }
 
+// SetLimit bounds the table to about limit IDs (the root excluded): when a
+// new ID would exceed it, the least recently used IDs are forgotten, except
+// those keep reports true for. Callers holding an evicted ID see it as
+// stale, exactly as after Forget. limit <= 0 removes the bound.
+func (t *Table[ID]) SetLimit(limit int, keep func(ID) bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.limit, t.keep = limit, keep
+	if limit > 0 && t.lru.Len() == 0 {
+		for _, n := range t.byID {
+			if n != t.root {
+				n.elem = t.lru.PushFront(n)
+			}
+		}
+	}
+}
+
+// touch marks n as recently used.
+func (t *Table[ID]) touch(n *node[ID]) {
+	if t.limit > 0 && n.elem != nil {
+		t.lru.MoveToFront(n.elem)
+	}
+}
+
+// evict forgets least recently used IDs until the table is within limit.
+func (t *Table[ID]) evict() {
+	for e := t.lru.Back(); e != nil && t.lru.Len() > t.limit; {
+		n := e.Value.(*node[ID])
+		prev := e.Prev()
+		if t.keep == nil || !t.keep(n.id) {
+			t.lru.Remove(e)
+			n.elem = nil
+			delete(t.byID, n.id)
+			n.hasID = false
+			t.prune(n)
+		}
+		e = prev
+	}
+}
+
 // ID returns the ID of path, assigning a new one on first sight.
 func (t *Table[ID]) ID(path string) ID {
 	t.mu.Lock()
@@ -76,7 +123,13 @@ func (t *Table[ID]) ID(path string) ID {
 	if !n.hasID {
 		n.id, n.hasID = t.next(), true
 		t.byID[n.id] = n
+		if t.limit > 0 {
+			n.elem = t.lru.PushFront(n)
+			t.evict()
+		}
+		return n.id
 	}
+	t.touch(n)
 	return n.id
 }
 
@@ -85,6 +138,7 @@ func (t *Table[ID]) Lookup(path string) (ID, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if n := t.find(path, false); n != nil && n.hasID {
+		t.touch(n)
 		return n.id, true
 	}
 	var zero ID
@@ -99,6 +153,7 @@ func (t *Table[ID]) Path(id ID) (path string, ok bool) {
 	if !ok {
 		return "", false
 	}
+	t.touch(n)
 	return pathOf(n), true
 }
 
@@ -162,6 +217,11 @@ func (t *Table[ID]) forgetLocked(n *node[ID]) {
 	drop = func(n *node[ID]) {
 		if n.hasID {
 			delete(t.byID, n.id)
+			n.hasID = false
+		}
+		if n.elem != nil {
+			t.lru.Remove(n.elem)
+			n.elem = nil
 		}
 		for _, c := range n.children {
 			drop(c)

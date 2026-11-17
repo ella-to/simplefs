@@ -967,3 +967,24 @@ func TestRetransmittedRemoveIsAnsweredFromCache(t *testing.T) {
 		t.Fatalf("REMOVE from another client = %d, want NOENT", st)
 	}
 }
+
+func TestMaxHandlesEvictsToStale(t *testing.T) {
+	p := memfs.New()
+	for i := range 10 {
+		simplefs.WriteFile(t.Context(), p, "/f"+strconv.Itoa(i), nil, 0)
+	}
+	_, c := startServerWith(t, p, Options{MaxHandles: 4})
+	root := c.mnt()
+	first := c.lookup(root, "f0", nfsOK)
+	for i := 1; i < 10; i++ {
+		c.lookup(root, "f"+strconv.Itoa(i), nfsOK)
+	}
+	args := newWriter()
+	args.opaque(first)
+	c.nfsCall(nfsProcGetattr, args, nfsErrStale)
+	// Looking it up again works.
+	again := c.lookup(root, "f0", nfsOK)
+	args = newWriter()
+	args.opaque(again)
+	c.nfsCall(nfsProcGetattr, args, nfsOK)
+}

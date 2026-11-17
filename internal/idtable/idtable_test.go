@@ -112,3 +112,31 @@ func BenchmarkIDAndPath(b *testing.B) {
 		tb.Path(id)
 	}
 }
+
+func TestLimitEvictsLeastRecentlyUsed(t *testing.T) {
+	tb := New[uint64](1, counter())
+	pinned := map[uint64]bool{}
+	tb.SetLimit(3, func(id uint64) bool { return pinned[id] })
+	a := tb.ID("/a")
+	b := tb.ID("/b")
+	pinned[b] = true
+	c := tb.ID("/c")
+	tb.Path(a) // a is now more recent than c
+	d := tb.ID("/d")
+	if _, ok := tb.Path(c); ok {
+		t.Fatal("least recently used ID survived")
+	}
+	for _, id := range []uint64{1, a, b, d} {
+		if _, ok := tb.Path(id); !ok {
+			t.Fatalf("id %d evicted", id)
+		}
+	}
+	tb.ID("/e")
+	if _, ok := tb.Path(b); !ok {
+		t.Fatal("pinned ID evicted")
+	}
+	// A re-lookup of an evicted path gets a fresh ID.
+	if c2 := tb.ID("/c"); c2 == c {
+		t.Fatal("evicted ID reused")
+	}
+}

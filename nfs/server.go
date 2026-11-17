@@ -84,6 +84,13 @@ type Options struct {
 	// Zero means 64.
 	MaxInFlight int
 
+	// MaxHandles bounds how many filehandles (path IDs) the server
+	// remembers. Beyond it the least recently used are forgotten — never
+	// one with an open cached provider handle — and clients holding them
+	// get NFS3ERR_STALE and look the path up again. Zero means 1<<20;
+	// negative means unbounded.
+	MaxHandles int
+
 	// HandleIdle is how long an open provider handle stays cached after its
 	// last READ/WRITE before it is closed. Zero means 5s.
 	HandleIdle time.Duration
@@ -160,6 +167,12 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 	}
 	rand.Read(s.writeVerf[:])
 	rand.Read(s.bootID[:])
+	switch {
+	case opts.MaxHandles == 0:
+		s.fh.SetLimit(1<<20, s.files.inUse)
+	case opts.MaxHandles > 0:
+		s.fh.SetLimit(opts.MaxHandles, s.files.inUse)
+	}
 	if opts.AttrCacheTTL > 0 {
 		go s.watchInvalidate()
 	}

@@ -142,6 +142,15 @@ func (c *openCache) acquire(ctx context.Context, id uint64, path string, write b
 	return h, func() { c.release(e) }, nil
 }
 
+// inUse reports whether id has a cached provider handle (so its filehandle
+// must not be forgotten).
+func (c *openCache) inUse(id uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.entries[id]
+	return ok
+}
+
 // retireLocked removes e from the map and closes it now if unused, or marks
 // it so the last release closes it.
 func (c *openCache) retireLocked(id uint64, e *openEntry) {
