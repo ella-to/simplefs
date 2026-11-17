@@ -1,6 +1,7 @@
 # A containerized simplefs NFS server (examples/nfsserver backed by memfs).
 #
 #   docker build -t simplefs-nfs .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t simplefs-nfs .
 #   docker run --rm -p 2049:2049 simplefs-nfs
 #
 # No privileges needed to SERVE. Consume the volume from outside:
@@ -19,11 +20,13 @@
 #
 #   docker run --rm --cap-add SYS_ADMIN simplefs-nfs --mount /mnt/simplefs
 
-FROM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
-COPY go.mod ./
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/nfsserver ./examples/nfsserver
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/nfsserver ./examples/nfsserver
 
 FROM alpine:3.22
 COPY --from=build /out/nfsserver /usr/local/bin/nfsserver
