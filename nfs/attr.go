@@ -3,6 +3,7 @@ package nfs
 // NFSv3 (RFC 1813) attribute encoding and error translation.
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -31,6 +32,7 @@ const (
 	nfsErrNotSupp     = 10004
 	nfsErrServerFault = 10006
 	nfsErrBadType     = 10007
+	nfsErrJukebox     = 10008
 )
 
 // errStatus translates a provider error into an nfsstat3 code, logging
@@ -61,12 +63,20 @@ func statusOf(err error) uint32 {
 		return nfsErrNotEmpty
 	case errors.Is(err, simplefs.ErrPermission):
 		return nfsErrAcces
+	case errors.Is(err, simplefs.ErrReadOnly):
+		return nfsErrROFS
+	case errors.Is(err, simplefs.ErrNoSpace):
+		return nfsErrNoSpc
+	case errors.Is(err, simplefs.ErrTooLarge):
+		return nfsErrFBig
+	case errors.Is(err, simplefs.ErrNameTooLong):
+		return nfsErrNameTooL
 	case errors.Is(err, simplefs.ErrNotSupported):
 		return nfsErrNotSupp
 	case errors.Is(err, simplefs.ErrInvalid):
 		return nfsErrInval
-	case errors.Is(err, simplefs.ErrNoSpace):
-		return nfsErrNoSpc
+	case errors.Is(err, simplefs.ErrBusy), errors.Is(err, context.DeadlineExceeded):
+		return nfsErrJukebox
 	default:
 		return nfsErrIO
 	}

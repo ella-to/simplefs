@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"testing"
 	"time"
 
@@ -465,5 +466,16 @@ func TestCapacity(t *testing.T) {
 	fsinfo, _ := m.StatFS(ctx)
 	if fsinfo.Blocks*fsinfo.BlockSize > 100 {
 		t.Fatalf("StatFS reports %d bytes, capacity is 100", fsinfo.Blocks*fsinfo.BlockSize)
+	}
+}
+
+func TestErrorsMatchIOFS(t *testing.T) {
+	_, err := New().Stat(t.Context(), "/missing")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Stat missing = %v, want fs.ErrNotExist", err)
+	}
+	var pe *fs.PathError
+	if !errors.As(err, &pe) || pe.Path != "/missing" {
+		t.Fatalf("error %v is not an *fs.PathError for /missing", err)
 	}
 }

@@ -27,6 +27,7 @@
 package mount
 
 import (
+	"context"
 	"errors"
 	"sync"
 
@@ -93,8 +94,8 @@ type Error struct {
 func (e *Error) Error() string { return e.Msg }
 
 // CodeOf classifies err into a (Code, message) pair. A nil error is CodeOK, a
-// *mount.Error passes through, and the fs sentinel errors map onto the codes
-// whose Finder behavior matches them; anything else is CodeIO.
+// *mount.Error passes through, and the simplefs sentinel errors map onto the
+// codes whose Finder behavior matches them; anything else is CodeIO.
 func CodeOf(err error) (Code, string) {
 	var me *Error
 	switch {
@@ -106,12 +107,15 @@ func CodeOf(err error) (Code, string) {
 		return CodeNotFound, err.Error()
 	case errors.Is(err, simplefs.ErrExist), errors.Is(err, simplefs.ErrNotEmpty):
 		return CodeNameConflict, err.Error()
-	case errors.Is(err, simplefs.ErrPermission):
+	case errors.Is(err, simplefs.ErrPermission), errors.Is(err, simplefs.ErrReadOnly):
 		return CodeNotPermitted, err.Error()
-	case errors.Is(err, simplefs.ErrNoSpace):
+	case errors.Is(err, simplefs.ErrNoSpace), errors.Is(err, simplefs.ErrTooLarge):
 		return CodeQuota, err.Error()
-	case errors.Is(err, simplefs.ErrNotSupported), errors.Is(err, simplefs.ErrIsDir), errors.Is(err, simplefs.ErrNotDir):
+	case errors.Is(err, simplefs.ErrNotSupported), errors.Is(err, simplefs.ErrIsDir),
+		errors.Is(err, simplefs.ErrNotDir), errors.Is(err, simplefs.ErrNameTooLong):
 		return CodeUnsupported, err.Error()
+	case errors.Is(err, simplefs.ErrBusy), errors.Is(err, context.DeadlineExceeded):
+		return CodeServer, err.Error()
 	default:
 		return CodeIO, err.Error()
 	}

@@ -1,16 +1,36 @@
 package simplefs
 
-import "errors"
+import (
+	"errors"
+	"io/fs"
+)
 
 // Sentinel errors providers should wrap (typically inside a *PathError).
-// Mounts use errors.Is against these to translate failures into native error
-// codes, so returning a bare fmt.Errorf loses information.
+// Backends use errors.Is against these to translate failures into native
+// error codes, so returning a bare fmt.Errorf loses information.
+//
+// Where the standard library already has a sentinel, these are the very same
+// values, so errors.Is(err, fs.ErrNotExist) and errors.Is(err,
+// simplefs.ErrNotExist) are interchangeable.
 var (
 	// ErrNotExist indicates the path does not exist.
-	ErrNotExist = errors.New("file does not exist")
+	ErrNotExist = fs.ErrNotExist
 
 	// ErrExist indicates the path already exists.
-	ErrExist = errors.New("file already exists")
+	ErrExist = fs.ErrExist
+
+	// ErrPermission indicates the operation is not allowed.
+	ErrPermission = fs.ErrPermission
+
+	// ErrInvalid indicates an invalid argument (bad path, bad offset,
+	// conflicting open flags, ...).
+	ErrInvalid = fs.ErrInvalid
+
+	// ErrClosed indicates a FileHandle was used after Close.
+	ErrClosed = fs.ErrClosed
+
+	// ErrNotSupported indicates the provider does not support the operation.
+	ErrNotSupported = errors.ErrUnsupported
 
 	// ErrIsDir indicates a file operation was attempted on a directory.
 	ErrIsDir = errors.New("is a directory")
@@ -22,32 +42,27 @@ var (
 	// rename) hit a non-empty directory.
 	ErrNotEmpty = errors.New("directory not empty")
 
-	// ErrPermission indicates the operation is not allowed.
-	ErrPermission = errors.New("permission denied")
-
-	// ErrNotSupported indicates the provider does not support the operation.
-	ErrNotSupported = errors.New("operation not supported")
-
-	// ErrInvalid indicates an invalid argument (bad path, bad offset,
-	// conflicting open flags, ...).
-	ErrInvalid = errors.New("invalid argument")
-
-	// ErrClosed indicates a FileHandle was used after Close.
-	ErrClosed = errors.New("file already closed")
+	// ErrReadOnly indicates a mutation of a read-only filesystem.
+	ErrReadOnly = errors.New("read-only file system")
 
 	// ErrNoSpace indicates the provider has no room for the data (disk
 	// full, quota exceeded).
 	ErrNoSpace = errors.New("no space left on device")
+
+	// ErrTooLarge indicates a file would exceed the provider's maximum
+	// file size.
+	ErrTooLarge = errors.New("file too large")
+
+	// ErrNameTooLong indicates a path element exceeds the provider's name
+	// length limit.
+	ErrNameTooLong = errors.New("file name too long")
+
+	// ErrBusy indicates a transient failure (rate limit, backend briefly
+	// unavailable); the caller may retry the operation later.
+	ErrBusy = errors.New("resource temporarily unavailable")
 )
 
-// PathError records an error, the operation, and the path that caused it —
-// the same shape as io/fs.PathError, without depending on it.
-type PathError struct {
-	Op   string
-	Path string
-	Err  error
-}
-
-func (e *PathError) Error() string { return e.Op + " " + e.Path + ": " + e.Err.Error() }
-
-func (e *PathError) Unwrap() error { return e.Err }
+// PathError records an error, the operation, and the path that caused it.
+// It is io/fs.PathError, so code written against the standard library
+// handles provider errors unchanged.
+type PathError = fs.PathError

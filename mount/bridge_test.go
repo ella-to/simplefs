@@ -1,10 +1,12 @@
 package mount
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
 
+	"ella.to/simplefs"
 	"ella.to/simplefs/memfs"
 )
 
@@ -193,4 +195,37 @@ func TestBridgeReadDirPaginationDrained(t *testing.T) {
 
 func fmtName(i int) string {
 	return "f" + string(rune('a'+i/26/26%26)) + string(rune('a'+i/26%26)) + string(rune('a'+i%26)) + ".txt"
+}
+
+func TestCodeOfTable(t *testing.T) {
+	cases := []struct {
+		err  error
+		want Code
+	}{
+		{nil, CodeOK},
+		{simplefs.ErrNotExist, CodeNotFound},
+		{simplefs.ErrExist, CodeNameConflict},
+		{simplefs.ErrNotEmpty, CodeNameConflict},
+		{simplefs.ErrIsDir, CodeUnsupported},
+		{simplefs.ErrNotDir, CodeUnsupported},
+		{simplefs.ErrPermission, CodeNotPermitted},
+		{simplefs.ErrReadOnly, CodeNotPermitted},
+		{simplefs.ErrNoSpace, CodeQuota},
+		{simplefs.ErrTooLarge, CodeQuota},
+		{simplefs.ErrNameTooLong, CodeUnsupported},
+		{simplefs.ErrNotSupported, CodeUnsupported},
+		{simplefs.ErrInvalid, CodeIO},
+		{simplefs.ErrBusy, CodeServer},
+		{context.DeadlineExceeded, CodeServer},
+		{&Error{Code: CodeQuota, Msg: "x"}, CodeQuota},
+	}
+	for _, c := range cases {
+		err := c.err
+		if err != nil {
+			err = &simplefs.PathError{Op: "op", Path: "/p", Err: err}
+		}
+		if got, _ := CodeOf(err); got != c.want {
+			t.Errorf("CodeOf(%v) = %d, want %d", c.err, got, c.want)
+		}
+	}
 }
