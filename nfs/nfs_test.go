@@ -22,7 +22,7 @@ import (
 
 // testClient is a tiny synchronous ONC RPC client, enough to drive the server.
 type testClient struct {
-	t    *testing.T
+	t    testing.TB
 	conn net.Conn
 	xid  uint32
 }
@@ -33,7 +33,7 @@ func startServer(t *testing.T) (*Server, *testClient) {
 }
 
 // startServerWith serves p with opts on a loopback listener and dials it.
-func startServerWith(t *testing.T, p simplefs.FileProvider, opts Options) (*Server, *testClient) {
+func startServerWith(t testing.TB, p simplefs.FileProvider, opts Options) (*Server, *testClient) {
 	t.Helper()
 	srv := NewServer(p, opts)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
