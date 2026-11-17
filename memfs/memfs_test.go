@@ -360,3 +360,23 @@ func TestWatchScope(t *testing.T) {
 		t.Fatalf("non-recursive watcher got %v %s, want create /dir/direct.txt", ev.Type, ev.Path)
 	}
 }
+
+func TestShrinkThenGrowReadsZeros(t *testing.T) {
+	ctx := t.Context()
+	m := New()
+	h, err := m.Create(ctx, "/f", simplefs.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	h.WriteAt([]byte("abcdefgh"), 0)
+	if err := h.Truncate(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	h.WriteAt([]byte("Z"), 6) // grows within the old capacity
+	buf := make([]byte, 7)
+	n, _ := h.ReadAt(buf, 0)
+	if got := string(buf[:n]); got != "ab\x00\x00\x00\x00Z" {
+		t.Fatalf("content = %q", got)
+	}
+}

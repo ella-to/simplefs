@@ -744,9 +744,7 @@ func (h *handle) WriteAt(p []byte, off int64) (int, error) {
 		off = int64(len(h.n.data))
 	}
 	if end := off + int64(len(p)); end > int64(len(h.n.data)) {
-		grown := make([]byte, end)
-		copy(grown, h.n.data)
-		h.n.data = grown
+		h.n.data = resize(h.n.data, end)
 	}
 	copy(h.n.data[off:], p)
 	h.n.modTime = time.Now()
@@ -773,20 +771,34 @@ func (h *handle) Truncate(ctx context.Context, size int64) error {
 	h.m.mu.Lock()
 	defer h.m.mu.Unlock()
 
-	switch {
-	case size < int64(len(h.n.data)):
-		h.n.data = h.n.data[:size]
-	case size > int64(len(h.n.data)):
-		grown := make([]byte, size)
-		copy(grown, h.n.data)
-		h.n.data = grown
-	default:
+	if size == int64(len(h.n.data)) {
 		return nil
 	}
+	h.n.data = resize(h.n.data, size)
 	h.n.modTime = time.Now()
 	h.n.bump()
 	h.m.event(simplefs.EventModify, h.path, "", h.n)
 	return nil
+}
+
+// resize returns data with length n. Growth is amortized (append's doubling
+// strategy), so sequential writes cost O(n) overall instead of O(n²); bytes
+// between the old and new length are zero, which is what a gap left by a
+// write past EOF, or a truncate that grows the file, must read back as.
+func resize(data []byte, n int64) []byte {
+	old := int64(len(data))
+	if n <= old {
+		// Clear the discarded tail so a later grow within capacity reads
+		// zeros rather than stale bytes.
+		clear(data[n:old])
+		return data[:n]
+	}
+	if n <= int64(cap(data)) {
+		data = data[:n]
+		clear(data[old:])
+		return data
+	}
+	return append(data, make([]byte, n-old)...)
 }
 
 func (h *handle) Close() error {
