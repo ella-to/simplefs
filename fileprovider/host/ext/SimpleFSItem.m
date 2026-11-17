@@ -171,15 +171,26 @@ static NSString *GoContainer(NSFileProviderItemIdentifier container) {
                                           perms:perms];
 }
 
-+ (NSArray<SimpleFSItem *> *)itemsInContainer:(NSFileProviderItemIdentifier)container {
++ (NSArray<SimpleFSItem *> *)itemsInContainer:(NSFileProviderItemIdentifier)container
+                                        token:(NSString *)token
+                                        limit:(int)limit
+                                    nextToken:(NSString **)nextToken
+                                        error:(NSError **)error {
     NSString *goID = GoContainer(container);
-    NSDictionary *res = [self resultFromGoJSON:ProviderListJSON((char *)goID.UTF8String)];
+    NSDictionary *res = [self resultFromGoJSON:
+        ProviderListJSON((char *)goID.UTF8String, (char *)token.UTF8String, limit)];
+    *nextToken = nil;
     if (![res[@"ok"] boolValue]) {
-        return @[];
+        *error = [self errorForCode:[res[@"code"] intValue] message:res[@"msg"]];
+        return nil;
     }
     NSMutableArray<SimpleFSItem *> *items = [NSMutableArray array];
     for (NSDictionary *d in res[@"items"]) {
         [items addObject:[self itemFromDictionary:d]];
+    }
+    NSString *next = res[@"next"];
+    if (next.length) {
+        *nextToken = next;
     }
     return items;
 }

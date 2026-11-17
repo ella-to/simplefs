@@ -31,6 +31,7 @@ type resultDTO struct {
 	OK    bool                `json:"ok"`
 	Item  *fileprovider.Item  `json:"item,omitempty"`
 	Items []fileprovider.Item `json:"items,omitempty"`
+	Next  string              `json:"next,omitempty"`
 	Code  int                 `json:"code,omitempty"`
 	Msg   string              `json:"msg,omitempty"`
 }
@@ -45,10 +46,6 @@ func marshal(r resultDTO) *C.char {
 
 func okItem(it fileprovider.Item) *C.char {
 	return marshal(resultDTO{OK: true, Item: &it})
-}
-
-func okItems(items []fileprovider.Item) *C.char {
-	return marshal(resultDTO{OK: true, Items: items})
 }
 
 func okNone() *C.char { return marshal(resultDTO{OK: true}) }
@@ -78,20 +75,22 @@ func ProviderRootJSON() *C.char {
 	return okItem(it)
 }
 
-// ProviderListJSON returns the children of the container with the given ID
-// (empty string for the root) as a result envelope.
+// ProviderListJSON returns one page of the children of the container with
+// the given ID (empty string for the root): at most limit items (<= 0: all)
+// after ctoken ("" for the first page). The envelope's "next" is the token
+// of the following page, absent on the last.
 //
 //export ProviderListJSON
-func ProviderListJSON(cParent *C.char) *C.char {
+func ProviderListJSON(cParent, ctoken *C.char, limit C.int) *C.char {
 	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
-	items, err := b.ReadDir(C.GoString(cParent))
+	items, next, err := b.ReadDirPage(C.GoString(cParent), C.GoString(ctoken), int(limit))
 	if err != nil {
 		return fail(err)
 	}
-	return okItems(items)
+	return marshal(resultDTO{OK: true, Items: items, Next: next})
 }
 
 // ProviderItemJSON returns a single item's metadata as a result envelope.

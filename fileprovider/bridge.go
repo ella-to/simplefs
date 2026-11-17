@@ -151,6 +151,36 @@ func (b *Bridge) Stat(id string) (Item, error) {
 	return b.item(info, id), nil
 }
 
+// ReadDirPage returns one page of a container's children: at most limit
+// items (<= 0: all) after token (the previous page's next token; "" for the
+// first page). next is "" on the last page. The system enumerates large
+// folders page by page this way instead of in one huge call.
+func (b *Bridge) ReadDirPage(parentID, token string, limit int) (items []Item, next string, err error) {
+	parent, err := b.pathFor(parentID)
+	if err != nil {
+		return nil, "", err
+	}
+	page, err := b.p.ReadDir(b.ctx, parent, simplefs.Page{Limit: limit, Token: token})
+	if err != nil {
+		return nil, "", wrapErr(err)
+	}
+	for _, e := range page.Entries {
+		childPath := simplefs.JoinPath(parent, e.Name)
+		var info simplefs.FileInfo
+		if e.Info != nil {
+			info = *e.Info
+			info.Path = childPath
+		} else if info, err = b.p.Stat(b.ctx, childPath); err != nil {
+			if errors.Is(err, simplefs.ErrNotExist) {
+				continue // vanished between ReadDir and Stat
+			}
+			return nil, "", wrapErr(err)
+		}
+		items = append(items, b.item(info, b.idFor(childPath)))
+	}
+	return items, page.NextToken, nil
+}
+
 // ReadDir returns the children of a container, draining the provider's
 // pagination so the system always sees the complete listing.
 func (b *Bridge) ReadDir(parentID string) ([]Item, error) {

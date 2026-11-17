@@ -38,7 +38,10 @@ enum {
 // Metadata / listing. Each returns a JSON result envelope C string the caller
 // frees with ProviderFree.
 char *ProviderRootJSON(void);
-char *ProviderListJSON(char *parentID);
+// ProviderListJSON returns one page (at most limit items; <= 0: all) after
+// token ("" for the first page); the envelope's "next" is the following
+// page's token, absent on the last page.
+char *ProviderListJSON(char *parentID, char *token, int limit);
 char *ProviderItemJSON(char *id);
 
 // Content. Streams the file's content into the local file dstPath and

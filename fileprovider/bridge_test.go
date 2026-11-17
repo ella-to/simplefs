@@ -274,3 +274,31 @@ func TestBridgeFetchToStreams(t *testing.T) {
 }
 
 func CodeOfMust(err error) Code { c, _ := CodeOf(err); return c }
+
+func TestBridgeReadDirPage(t *testing.T) {
+	b := NewBridge(memfs.New())
+	for i := range 7 {
+		createFile(t, b, RootID, "f"+string(rune('a'+i)), "")
+	}
+	var names []string
+	token := ""
+	for pages := 0; ; pages++ {
+		items, next, err := b.ReadDirPage(RootID, token, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) > 3 || pages > 5 {
+			t.Fatalf("page %d has %d items", pages, len(items))
+		}
+		for _, it := range items {
+			names = append(names, it.Name)
+		}
+		if next == "" {
+			break
+		}
+		token = next
+	}
+	if len(names) != 7 {
+		t.Fatalf("paged %d items, want 7: %v", len(names), names)
+	}
+}

@@ -30,9 +30,16 @@ NS_ASSUME_NONNULL_BEGIN
 // dictionary. Frees the C string. Returns nil on a parse failure.
 + (nullable NSDictionary *)resultFromGoJSON:(char *)json;
 
-// Children of a container (queries the Go side). The system root and working
-// set are mapped to the Go root id.
-+ (NSArray<SimpleFSItem *> *)itemsInContainer:(NSFileProviderItemIdentifier)container;
+// One page of a container's children (queries the Go side): at most limit
+// items after token (empty for the first page). *nextToken is set to the
+// following page's token, or nil on the last page. The system root and
+// working set are mapped to the Go root id. Returns nil on failure, with
+// *error set.
++ (nullable NSArray<SimpleFSItem *> *)itemsInContainer:(NSFileProviderItemIdentifier)container
+                                                 token:(NSString *)token
+                                                 limit:(int)limit
+                                             nextToken:(NSString * _Nullable * _Nonnull)nextToken
+                                                 error:(NSError * _Nullable * _Nonnull)error;
 
 // Look up a single item by identifier (queries the Go side). nil if missing.
 + (nullable SimpleFSItem *)itemForIdentifier:(NSFileProviderItemIdentifier)identifier;
