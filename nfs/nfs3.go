@@ -380,8 +380,14 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 	id := s.fh.id(path)
 	if how == createExclusive {
 		s.rememberCreateVerf(path, verf)
-	} else if attr.setSize {
-		s.applySattr(path, id, sattr3{setSize: true, size: attr.size})
+	} else if attr.setSize && attr.size != 0 {
+		// Create already truncated the file to zero; only a non-zero size
+		// needs another round trip.
+		if err := s.applySattr(path, id, sattr3{setSize: true, size: attr.size}); err != nil {
+			w.uint32(errStatus(err))
+			s.wccData(w, dir, dirID)
+			return
+		}
 	}
 	s.createOK(w, path, dir, dirID)
 }
@@ -522,6 +528,7 @@ func (s *Server) opRename(r *xdrReader, w *xdrWriter) {
 		}
 		s.fh.forget(newPath)
 		s.fh.rekey(oldPath, newPath)
+		s.renameCreateVerf(oldPath, newPath)
 	}
 	w.uint32(nfsOK)
 	s.wccData(w, fromDir, fromDirID)

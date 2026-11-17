@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -658,5 +659,24 @@ func TestCloseStopsConnections(t *testing.T) {
 	}
 	if n := runtime.NumGoroutine(); n > before {
 		t.Fatalf("goroutines: %d after Close, %d before", n, before)
+	}
+}
+
+func TestCreateVerfBounded(t *testing.T) {
+	srv := NewServer(memfs.New(), Options{})
+	defer srv.Close()
+	var v [8]byte
+	for i := range maxCreateVerfs * 3 {
+		srv.rememberCreateVerf("/f"+strconv.Itoa(i), v)
+	}
+	if n := len(srv.createVerf); n > maxCreateVerfs {
+		t.Fatalf("createVerf holds %d entries, cap %d", n, maxCreateVerfs)
+	}
+	if len(srv.verfOrder) > 2*maxCreateVerfs {
+		t.Fatalf("verfOrder not compacted: %d", len(srv.verfOrder))
+	}
+	srv.renameCreateVerf("/f"+strconv.Itoa(maxCreateVerfs*3-1), "/moved")
+	if !srv.sameCreateVerf("/moved", v) {
+		t.Fatal("verifier did not follow rename")
 	}
 }

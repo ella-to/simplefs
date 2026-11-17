@@ -66,7 +66,8 @@ type Server struct {
 	writeVerf [8]byte
 
 	verfMu     sync.Mutex
-	createVerf map[string][8]byte
+	createVerf map[string][8]byte // path -> exclusive-create verifier
+	verfOrder  []string           // insertion order, for bounding createVerf
 
 	mu        sync.Mutex
 	port      int
@@ -316,6 +317,10 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// maxCreateVerfs bounds how many exclusive-create verifiers are remembered;
+// a retransmission only ever arrives shortly after the original call.
+const maxCreateVerfs = 1024
+
 // sameCreateVerf reports whether path was created by an exclusive CREATE with
 // this verifier (i.e. the call is a retransmission).
 func (s *Server) sameCreateVerf(path string, verf [8]byte) bool {
@@ -327,12 +332,48 @@ func (s *Server) sameCreateVerf(path string, verf [8]byte) bool {
 
 func (s *Server) rememberCreateVerf(path string, verf [8]byte) {
 	s.verfMu.Lock()
+	defer s.verfMu.Unlock()
+	if _, ok := s.createVerf[path]; !ok {
+		s.verfOrder = append(s.verfOrder, path)
+	}
 	s.createVerf[path] = verf
-	s.verfMu.Unlock()
+	for len(s.createVerf) > maxCreateVerfs && len(s.verfOrder) > 0 {
+		oldest := s.verfOrder[0]
+		s.verfOrder = s.verfOrder[1:]
+		delete(s.createVerf, oldest)
+	}
+	if len(s.verfOrder) > 2*maxCreateVerfs {
+		s.compactVerfOrderLocked()
+	}
 }
 
 func (s *Server) forgetCreateVerf(path string) {
 	s.verfMu.Lock()
 	delete(s.createVerf, path)
 	s.verfMu.Unlock()
+}
+
+// renameCreateVerf moves a remembered verifier along with its file.
+func (s *Server) renameCreateVerf(oldPath, newPath string) {
+	s.verfMu.Lock()
+	defer s.verfMu.Unlock()
+	delete(s.createVerf, newPath)
+	if v, ok := s.createVerf[oldPath]; ok {
+		delete(s.createVerf, oldPath)
+		s.createVerf[newPath] = v
+		s.verfOrder = append(s.verfOrder, newPath)
+	}
+}
+
+// compactVerfOrderLocked drops order entries whose verifier is gone.
+func (s *Server) compactVerfOrderLocked() {
+	seen := make(map[string]bool, len(s.createVerf))
+	kept := s.verfOrder[:0]
+	for _, p := range s.verfOrder {
+		if _, ok := s.createVerf[p]; ok && !seen[p] {
+			seen[p] = true
+			kept = append(kept, p)
+		}
+	}
+	s.verfOrder = kept
 }
