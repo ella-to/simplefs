@@ -1,8 +1,8 @@
 package nfs
 
 // NFSv3 addresses files by opaque filehandle while simplefs.FileProvider is
-// path-based, so the server keeps an ID<->path table (the same idea as
-// mount.Bridge), re-keying on rename and forgetting on remove. The 8-byte ID
+// path-based, so the server keeps an ID<->path table (internal/idtable, as
+// fileprovider.Bridge does), re-keying on rename and forgetting on remove. The 8-byte ID
 // doubles as the fileid3 attribute, so it must stay stable for the life of a
 // file. The table lives in memory: handles held by a client across a server
 // restart come back NFS3ERR_STALE, which is the protocol's word for exactly
@@ -15,82 +15,16 @@ import (
 	"time"
 
 	"ella.to/simplefs"
+	"ella.to/simplefs/internal/idtable"
 )
 
 const rootFileID = 1
 
-// fhTable maps 8-byte filehandle IDs to provider paths and back.
-type fhTable struct {
-	mu     sync.Mutex
-	byID   map[uint64]string
-	byPath map[string]uint64
-	next   uint64
-}
-
-func newFHTable() *fhTable {
-	t := &fhTable{
-		byID:   map[uint64]string{rootFileID: "/"},
-		byPath: map[string]uint64{"/": rootFileID},
-		next:   rootFileID,
-	}
-	return t
-}
-
-// id returns the stable ID for path, assigning one on first sight.
-func (t *fhTable) id(path string) uint64 {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if id, ok := t.byPath[path]; ok {
-		return id
-	}
-	t.next++
-	t.byPath[path] = t.next
-	t.byID[t.next] = path
-	return t.next
-}
-
-// lookup returns the ID already assigned to path, without assigning one.
-func (t *fhTable) lookup(path string) (uint64, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	id, ok := t.byPath[path]
-	return id, ok
-}
-
-// path resolves an ID back to a path; ok is false for stale handles.
-func (t *fhTable) path(id uint64) (string, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	p, ok := t.byID[id]
-	return p, ok
-}
-
-// rekey moves oldPath (and every mapped descendant) to newPath, keeping IDs
-// stable across the rename.
-func (t *fhTable) rekey(oldPath, newPath string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for p, id := range t.byPath {
-		if !simplefs.IsUnder(oldPath, p) {
-			continue
-		}
-		moved := newPath + p[len(oldPath):]
-		delete(t.byPath, p)
-		t.byPath[moved] = id
-		t.byID[id] = moved
-	}
-}
-
-// forget drops path and every mapped descendant.
-func (t *fhTable) forget(path string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for p, id := range t.byPath {
-		if simplefs.IsUnder(path, p) {
-			delete(t.byPath, p)
-			delete(t.byID, id)
-		}
-	}
+// newFHTable returns the filehandle table: "/" is rootFileID, and new paths
+// get increasing IDs (called under the table's lock).
+func newFHTable() *idtable.Table[uint64] {
+	next := uint64(rootFileID)
+	return idtable.New(uint64(rootFileID), func() uint64 { next++; return next })
 }
 
 // encodeFH renders an ID as the wire filehandle (opaque, 8 bytes).

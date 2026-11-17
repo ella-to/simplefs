@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"ella.to/simplefs"
+	"ella.to/simplefs/internal/idtable"
 )
 
 // ErrServerClosed is returned by ListenAndServe, Serve, and ServePacket after
@@ -73,7 +74,7 @@ type Server struct {
 	opts Options
 	log  *slog.Logger
 
-	fh    *fhTable
+	fh    *idtable.Table[uint64]
 	files *openCache
 
 	// fsReadOnly caches FSInfo.ReadOnly from the most recent StatFS call

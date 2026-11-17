@@ -50,7 +50,7 @@ func (s *Server) fhPath(r *xdrReader) (path string, id uint64, stat uint32) {
 	if !ok {
 		return "", 0, nfsErrBadHandle
 	}
-	path, ok = s.fh.path(id)
+	path, ok = s.fh.Path(id)
 	if !ok {
 		return "", 0, nfsErrStale
 	}
@@ -179,7 +179,7 @@ func (s *Server) opLookup(r *xdrReader, w *xdrWriter) {
 		s.postOpAttr(w, dir, dirID)
 		return
 	}
-	id := s.fh.id(path)
+	id := s.fh.ID(path)
 	w.uint32(nfsOK)
 	w.opaque(encodeFH(id))
 	s.postOpAttrInfo(w, info, id)
@@ -415,7 +415,7 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 		return
 	}
 	h.Close()
-	id := s.fh.id(path)
+	id := s.fh.ID(path)
 	if how == createExclusive {
 		s.rememberCreateVerf(path, verf)
 	} else if attr.setSize && attr.size != 0 {
@@ -430,7 +430,7 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 
 // createOK writes the success arm shared by CREATE and its retransmissions.
 func (s *Server) createOK(w *xdrWriter, path, dir string, dirID uint64) {
-	id := s.fh.id(path)
+	id := s.fh.ID(path)
 	w.uint32(nfsOK)
 	postOpFH(w, id)
 	s.postOpAttr(w, path, id)
@@ -520,10 +520,10 @@ func (s *Server) opRemove(r *xdrReader, w *xdrWriter, wantDir bool) {
 		s.wccData(w, dir, dirID)
 		return
 	}
-	if id, ok := s.fh.lookup(path); ok {
+	if id, ok := s.fh.Lookup(path); ok {
 		s.files.drop(id)
 	}
-	s.fh.forget(path)
+	s.fh.Forget(path)
 	s.forgetCreateVerf(path)
 	w.uint32(nfsOK)
 	s.wccData(w, dir, dirID)
@@ -559,11 +559,11 @@ func (s *Server) opRename(r *xdrReader, w *xdrWriter) {
 			s.wccData(w, toDir, toDirID)
 			return
 		}
-		if id, ok := s.fh.lookup(newPath); ok {
+		if id, ok := s.fh.Lookup(newPath); ok {
 			s.files.drop(id) // the file that was overwritten
 		}
-		s.fh.forget(newPath)
-		s.fh.rekey(oldPath, newPath)
+		s.fh.Forget(newPath)
+		s.fh.Rekey(oldPath, newPath)
 		s.renameCreateVerf(oldPath, newPath)
 	}
 	w.uint32(nfsOK)
@@ -619,14 +619,14 @@ func (s *Server) listDir(dir string, dirID uint64) ([]dirEntry, error) {
 	parent := simplefs.ParentPath(dir)
 	entries := []dirEntry{
 		{name: ".", path: dir, id: dirID},
-		{name: "..", path: parent, id: s.fh.id(parent)},
+		{name: "..", path: parent, id: s.fh.ID(parent)},
 	}
 	for e, err := range simplefs.Entries(s.ctx, s.p, dir) {
 		if err != nil {
 			return nil, err
 		}
 		childPath := simplefs.JoinPath(dir, e.Name)
-		de := dirEntry{name: e.Name, path: childPath, id: s.fh.id(childPath)}
+		de := dirEntry{name: e.Name, path: childPath, id: s.fh.ID(childPath)}
 		if e.Info != nil {
 			info := *e.Info
 			info.Path = childPath

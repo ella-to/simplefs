@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"sync"
 
 	"ella.to/simplefs"
+	"ella.to/simplefs/internal/idtable"
 )
 
 // Bridge adapts a path-based simplefs.FileProvider onto the ID-based item model the
@@ -30,21 +30,21 @@ type Bridge struct {
 	ctx context.Context
 	p   simplefs.FileProvider
 
-	mu     sync.Mutex
-	byID   map[string]string // id -> path
-	byPath map[string]string // path -> id
-	next   uint64
+	ids *idtable.Table[string]
 }
 
 // NewBridge wraps p without registering it (useful for tests). Provider calls
 // receive context.Background(); the system does not carry a per-request
 // context across the extension boundary.
 func NewBridge(p simplefs.FileProvider) *Bridge {
+	var next uint64
 	return &Bridge{
-		ctx:    context.Background(),
-		p:      p,
-		byID:   map[string]string{},
-		byPath: map[string]string{},
+		ctx: context.Background(),
+		p:   p,
+		ids: idtable.New(RootID, func() string {
+			next++
+			return "sfs-" + strconv.FormatUint(next, 10)
+		}),
 	}
 }
 
@@ -65,62 +65,15 @@ type UpdateRequest struct {
 }
 
 // idFor returns the stable ID for path, assigning one on first sight.
-func (b *Bridge) idFor(path string) string {
-	if path == "/" {
-		return RootID
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if id, ok := b.byPath[path]; ok {
-		return id
-	}
-	b.next++
-	id := "sfs-" + strconv.FormatUint(b.next, 10)
-	b.byPath[path] = id
-	b.byID[id] = path
-	return id
-}
+func (b *Bridge) idFor(path string) string { return b.ids.ID(path) }
 
 // pathFor resolves an ID handed to us by the system back to a path.
 func (b *Bridge) pathFor(id string) (string, error) {
-	if id == RootID {
-		return "/", nil
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	path, ok := b.byID[id]
+	path, ok := b.ids.Path(id)
 	if !ok {
 		return "", &Error{Code: CodeNotFound, Msg: "no item with id " + id}
 	}
 	return path, nil
-}
-
-// rekey moves oldPath (and, for directories, every mapped descendant) to
-// newPath, keeping IDs stable across the rename.
-func (b *Bridge) rekey(oldPath, newPath string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for p, id := range b.byPath {
-		if !simplefs.IsUnder(oldPath, p) {
-			continue
-		}
-		moved := newPath + p[len(oldPath):]
-		delete(b.byPath, p)
-		b.byPath[moved] = id
-		b.byID[id] = moved
-	}
-}
-
-// forget drops path and every mapped descendant from the table.
-func (b *Bridge) forget(path string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for p, id := range b.byPath {
-		if simplefs.IsUnder(path, p) {
-			delete(b.byPath, p)
-			delete(b.byID, id)
-		}
-	}
 }
 
 // wrapErr turns a provider error into an *Error so the right NSError —
@@ -330,7 +283,7 @@ func (b *Bridge) Update(req UpdateRequest) (Item, error) {
 			if err := b.p.Rename(b.ctx, path, newPath, simplefs.RenameOptions{Overwrite: true}); err != nil {
 				return Item{}, wrapErr(err)
 			}
-			b.rekey(path, newPath)
+			b.ids.Rekey(path, newPath)
 			path = newPath
 		}
 	}
@@ -355,7 +308,7 @@ func (b *Bridge) Delete(id string) error {
 	if err := b.p.Remove(b.ctx, path, simplefs.RemoveOptions{Recursive: true}); err != nil {
 		return wrapErr(err)
 	}
-	b.forget(path)
+	b.ids.Forget(path)
 	return nil
 }
 
