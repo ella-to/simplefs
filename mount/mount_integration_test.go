@@ -8,13 +8,17 @@
 package mount_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,5 +137,68 @@ func TestMountExplicitPathAndUnmount(t *testing.T) {
 	}
 	if err := m.Unmount(t.Context()); err != nil {
 		t.Fatalf("second Unmount = %v", err)
+	}
+}
+
+// TestMain lets the test binary double as a child process that mounts and
+// then blocks, so TestCleanupStaleAfterCrash can kill it.
+func TestMain(m *testing.M) {
+	if dir := os.Getenv("SIMPLEFS_CRASH_CHILD"); dir != "" {
+		mt, err := mount.Mount(context.Background(), memfs.New(), mount.Options{Name: "crash", Path: dir})
+		if err != nil {
+			os.Stderr.WriteString(err.Error())
+			os.Exit(2)
+		}
+		os.Stdout.WriteString(mt.Path() + "\n")
+		select {} // wait to be killed
+	}
+	os.Exit(m.Run())
+}
+
+func TestCleanupStaleAfterCrash(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "crash")
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "SIMPLEFS_CRASH_CHILD="+dir)
+	stdout, _ := cmd.StdoutPipe()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		cmd.Wait()
+		if strings.Contains(stderr.String(), "privileges") {
+			t.Skip(stderr.String())
+		}
+		t.Fatalf("child did not mount: %v: %s", err, stderr.String())
+	}
+	mounted := strings.TrimSpace(line)
+	cmd.Process.Kill() // crash: no Unmount
+	cmd.Wait()
+
+	// The soft mount must fail instead of hanging.
+	done := make(chan error, 1)
+	go func() { _, err := os.ReadDir(mounted); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Log("ReadDir on the dead mount still succeeded (served from cache)")
+		}
+	case <-time.After(90 * time.Second):
+		t.Fatal("ReadDir on a dead mount hung")
+	}
+
+	if err := mount.CleanupStale(t.Context()); err != nil {
+		t.Fatalf("CleanupStale: %v", err)
+	}
+	if out, _ := exec.Command("mount").CombinedOutput(); bytes.Contains(out, []byte(mounted)) {
+		t.Fatalf("%s still mounted after CleanupStale", mounted)
+	}
+	if runtime.GOOS == "darwin" {
+		out, _ := exec.Command("nfsstat", "-m").CombinedOutput()
+		if bytes.Contains(out, []byte(mounted)) {
+			t.Fatalf("%s still mounted after CleanupStale", mounted)
+		}
 	}
 }

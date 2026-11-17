@@ -11,15 +11,16 @@ import (
 
 // attachNFS mounts the loopback server with /sbin/mount_nfs. macOS lets a
 // user mount NFS on a directory they own, so no root, app bundle, or signing
-// is needed. noresvport lets an unprivileged server port be used, and the
-// soft mount fails operations (instead of hanging) if this process dies.
+// is needed. noresvport lets an unprivileged server port be used; the soft
+// mount fails operations instead of hanging if this process dies, and
+// deadtimeout makes the kernel force-unmount it 30s after that.
 func attachNFS(ctx context.Context, cfg attachConfig) (string, func(), error) {
 	target, cleanup, err := darwinPath(cfg)
 	if err != nil {
 		return "", nil, err
 	}
-	opts := fmt.Sprintf("vers=3,tcp,port=%d,mountport=%d,nolocks,soft,timeo=50,retrans=1,"+
-		"noresvport,locallocks,nobrowse", cfg.port, cfg.port)
+	opts := fmt.Sprintf("vers=3,tcp,port=%d,mountport=%d,soft,timeo=50,retrans=1,"+
+		"deadtimeout=30,noresvport,locallocks,nobrowse", cfg.port, cfg.port)
 	if cfg.readOnly {
 		opts += ",rdonly"
 	}
