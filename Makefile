@@ -54,7 +54,7 @@ bench:
 check: fmt vet race cross
 
 example:
-	go run ./examples/memfs
+	go run ./examples/basic
 
 ifeq ($(shell uname -s),Darwin)
 
