@@ -39,6 +39,9 @@ type ChownProvider interface {
 }
 
 // ChtimesProvider supports changing file timestamps.
+//
+// As with os.Chtimes, a zero time.Time leaves the corresponding timestamp
+// unchanged, so callers can set only the access or only the modification time.
 type ChtimesProvider interface {
 	Chtimes(ctx context.Context, path string, atime, mtime time.Time) error
 }

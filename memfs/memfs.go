@@ -534,9 +534,14 @@ func (m *MemFS) Chown(ctx context.Context, path string, uid, gid int) error {
 }
 
 // Chtimes changes the modification time of the object at path (atime is
-// accepted for interface compatibility but not stored).
+// accepted for interface compatibility but not stored). A zero mtime leaves
+// the modification time unchanged.
 func (m *MemFS) Chtimes(ctx context.Context, path string, atime, mtime time.Time) error {
-	return m.setMeta("chtimes", path, func(n *node) { n.modTime = mtime })
+	return m.setMeta("chtimes", path, func(n *node) {
+		if !mtime.IsZero() {
+			n.modTime = mtime
+		}
+	})
 }
 
 func (m *MemFS) setMeta(op, path string, apply func(*node)) error {

@@ -5,10 +5,12 @@ package nfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"ella.to/simplefs"
 	"ella.to/simplefs/memfs"
@@ -23,7 +25,13 @@ type testClient struct {
 
 func startServer(t *testing.T) (*Server, *testClient) {
 	t.Helper()
-	srv := NewServer(memfs.New(), Options{})
+	return startServerWith(t, memfs.New(), Options{})
+}
+
+// startServerWith serves p with opts on a loopback listener and dials it.
+func startServerWith(t *testing.T, p simplefs.FileProvider, opts Options) (*Server, *testClient) {
+	t.Helper()
+	srv := NewServer(p, opts)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -544,5 +552,64 @@ func TestBigWriteMultipleFragments(t *testing.T) {
 	}
 	if !bytes.Equal(got, big) {
 		t.Fatalf("big file round trip mismatch (%d vs %d bytes)", len(got), len(big))
+	}
+}
+
+// timesRecorder records the arguments of every Chtimes call.
+type timesRecorder struct {
+	*memfs.MemFS
+	atimes, mtimes []time.Time
+}
+
+func (r *timesRecorder) Chtimes(ctx context.Context, path string, atime, mtime time.Time) error {
+	r.atimes = append(r.atimes, atime)
+	r.mtimes = append(r.mtimes, mtime)
+	return r.MemFS.Chtimes(ctx, path, atime, mtime)
+}
+
+func TestSetattrMtimeOnlyLeavesAtimeZero(t *testing.T) {
+	rec := &timesRecorder{MemFS: memfs.New()}
+	_, c := startServerWith(t, rec, Options{})
+	root := c.mnt()
+	fh := c.create(root, "f")
+
+	want := time.Unix(1_700_000_000, 0)
+	args := newWriter()
+	args.opaque(fh)
+	args.bool(false) // mode
+	args.bool(false) // uid
+	args.bool(false) // gid
+	args.bool(false) // size
+	args.uint32(0)   // atime: don't change
+	args.uint32(2)   // mtime: client time
+	args.uint32(uint32(want.Unix()))
+	args.uint32(0)
+	args.bool(false) // no guard
+	c.nfsCall(nfsProcSetattr, args, nfsOK)
+
+	if len(rec.mtimes) != 1 {
+		t.Fatalf("Chtimes called %d times", len(rec.mtimes))
+	}
+	if !rec.atimes[0].IsZero() {
+		t.Fatalf("atime = %v, want zero (unchanged)", rec.atimes[0])
+	}
+	if !rec.mtimes[0].Equal(want) {
+		t.Fatalf("mtime = %v, want %v", rec.mtimes[0], want)
+	}
+
+	// An atime-only SETATTR must not clobber the stored mtime.
+	args = newWriter()
+	args.opaque(fh)
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.uint32(1) // atime: server time
+	args.uint32(0) // mtime: don't change
+	args.bool(false)
+	c.nfsCall(nfsProcSetattr, args, nfsOK)
+	info, err := rec.Stat(t.Context(), "/f")
+	if err != nil || !info.ModTime.Equal(want) {
+		t.Fatalf("mtime after atime-only setattr = %v (%v), want %v", info.ModTime, err, want)
 	}
 }

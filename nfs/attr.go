@@ -239,6 +239,8 @@ func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 			if a.mtimeHow == 1 {
 				mtime = now
 			}
+			// A timestamp the client did not set stays zero, which
+			// ChtimesProvider defines as "leave unchanged".
 			if err := tp.Chtimes(s.ctx, path, atime, mtime); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
 				return err
 			}
