@@ -61,7 +61,7 @@ ifeq ($(shell uname -s),Darwin)
 SDK      := $(shell xcrun --show-sdk-path)
 ARCH     := $(shell uname -m)
 IDENTITY ?= -
-MINVER   := 11.0
+MINVER   := 13.0
 
 CAPI     := fileprovider/capi
 EXT_DIR  := fileprovider/host/ext

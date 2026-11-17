@@ -13,7 +13,7 @@ package fileprovider
 // rejects addDomain. See the repository Makefile and host/app.
 
 /*
-#cgo CFLAGS: -x objective-c -fobjc-arc -mmacosx-version-min=11.0
+#cgo CFLAGS: -x objective-c -fobjc-arc -mmacosx-version-min=13.0
 #cgo LDFLAGS: -framework Foundation -framework FileProvider
 
 #import <Foundation/Foundation.h>
