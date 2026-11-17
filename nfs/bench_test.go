@@ -250,7 +250,7 @@ func BenchmarkDispatch(b *testing.B) {
 			for b.Loop() {
 				rec := bufpool.Get(len(msg))
 				copy(rec, msg)
-				reply := srv.dispatch(b.Context(), rec)
+				reply := srv.dispatch(b.Context(), "bench", rec)
 				bufpool.Put(rec)
 				reply.release()
 			}

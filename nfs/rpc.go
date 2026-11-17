@@ -118,7 +118,7 @@ func replyRPCMismatch(xid uint32) *xdrWriter {
 // dispatch routes one RPC message to the program implementation and returns
 // the encoded reply (nil to send nothing). The caller releases the reply
 // once sent; msg is not retained.
-func (s *Server) dispatch(ctx context.Context, msg []byte) *xdrWriter {
+func (s *Server) dispatch(ctx context.Context, client string, msg []byte) *xdrWriter {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 	c, err := decodeCall(msg)
@@ -155,7 +155,21 @@ func (s *Server) dispatch(ctx context.Context, msg []byte) *xdrWriter {
 		if c.vers != 3 {
 			return replyProgMismatch(c.xid, 3)
 		}
-		return s.nfsProc(c)
+		if !nonIdempotent(c.proc) {
+			return s.nfsProc(c)
+		}
+		k := newDRCKey(client, c)
+		if cached, dup := s.drc.begin(k); dup {
+			if cached == nil {
+				return nil
+			}
+			w := newReplyWriter()
+			w.raw(cached)
+			return w
+		}
+		w := s.nfsProc(c)
+		s.drc.finish(k, w.bytes())
+		return w
 	case progNLM:
 		if c.vers != 4 {
 			return replyProgMismatch(c.xid, 4)
@@ -184,6 +198,7 @@ func (s *Server) serveConn(conn net.Conn) {
 	// sem bounds concurrent requests per connection: when it is full the
 	// reader stops, so a client cannot queue unbounded work.
 	sem := make(chan struct{}, s.maxInFlight())
+	client := clientIP(conn.RemoteAddr())
 	var wmu sync.Mutex
 	var hdr [4]byte
 	for {
@@ -217,7 +232,7 @@ func (s *Server) serveConn(conn net.Conn) {
 		reqs.Add(1)
 		go func(msg []byte) {
 			defer func() { <-sem; reqs.Done() }()
-			reply := s.dispatch(ctx, msg)
+			reply := s.dispatch(ctx, client, msg)
 			bufpool.Put(msg)
 			if reply == nil {
 				return
@@ -269,7 +284,7 @@ func (s *Server) servePacket(pc net.PacketConn) error {
 		reqs.Add(1)
 		go func(msg []byte, addr net.Addr) {
 			defer reqs.Done()
-			if reply := s.dispatch(s.ctx, msg); reply != nil {
+			if reply := s.dispatch(s.ctx, clientIP(addr), msg); reply != nil {
 				pc.WriteTo(reply.bytes(), addr)
 				reply.release()
 			}

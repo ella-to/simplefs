@@ -936,3 +936,34 @@ func TestReaddirSnapshotVerifier(t *testing.T) {
 	bogus := []byte{9, 9, 9, 9, 9, 9, 9, 9}
 	readdir(cookie, bogus, errBadCookie)
 }
+
+func TestRetransmittedRemoveIsAnsweredFromCache(t *testing.T) {
+	p := memfs.New()
+	simplefs.WriteFile(t.Context(), p, "/f", nil, 0)
+	srv := NewServer(p, Options{})
+	defer srv.Close()
+	root := srv.encodeFH(rootFileID)
+
+	args := newWriter()
+	args.opaque(root)
+	args.string("f")
+	msg := rpcMsg(progNFS, 3, nfsProcRemove, args)
+	status := func(client string) uint32 {
+		reply := srv.dispatch(t.Context(), client, slices.Clone(msg))
+		defer reply.release()
+		r := newReader(reply.bytes())
+		for range 6 { // xid, mtype, reply_stat, verf flavor, verf len, accept_stat
+			r.uint32()
+		}
+		return r.uint32()
+	}
+	if st := status("10.0.0.1"); st != nfsOK {
+		t.Fatalf("first REMOVE = %d", st)
+	}
+	if st := status("10.0.0.1"); st != nfsOK {
+		t.Fatalf("retransmitted REMOVE = %d, want the cached NFS3_OK", st)
+	}
+	if st := status("10.0.0.2"); st != nfsErrNoEnt {
+		t.Fatalf("REMOVE from another client = %d, want NOENT", st)
+	}
+}
