@@ -380,3 +380,46 @@ func TestShrinkThenGrowReadsZeros(t *testing.T) {
 		t.Fatalf("content = %q", got)
 	}
 }
+
+func TestStatFSTracksUsage(t *testing.T) {
+	ctx := t.Context()
+	m := New()
+	used := func() int64 {
+		t.Helper()
+		if _, err := m.StatFS(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return m.usedBytes
+	}
+	write := func(path string, n int) {
+		h, err := m.Create(ctx, path, simplefs.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.WriteAt(make([]byte, n), 0)
+		h.Close()
+	}
+	m.Mkdir(ctx, "/d", simplefs.MkdirOptions{})
+	write("/d/a", 100)
+	write("/b", 50)
+	if got := used(); got != 150 {
+		t.Fatalf("used = %d, want 150", got)
+	}
+	m.Link(ctx, "/b", "/b2") // a hard link is not new content
+	if got := used(); got != 150 {
+		t.Fatalf("used after link = %d, want 150", got)
+	}
+	m.Remove(ctx, "/b", simplefs.RemoveOptions{})
+	if got := used(); got != 150 {
+		t.Fatalf("used after removing one link = %d, want 150", got)
+	}
+	write("/c", 10)
+	m.Rename(ctx, "/c", "/b2", simplefs.RenameOptions{Overwrite: true})
+	if got := used(); got != 110 {
+		t.Fatalf("used after overwrite = %d, want 110", got)
+	}
+	m.Remove(ctx, "/d", simplefs.RemoveOptions{Recursive: true})
+	if got := used(); got != 10 {
+		t.Fatalf("used after recursive remove = %d, want 10", got)
+	}
+}

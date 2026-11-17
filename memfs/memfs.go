@@ -34,6 +34,7 @@ type node struct {
 	gid     int
 	xattr   map[string][]byte
 	version uint64
+	nlink   int // directory entries referring to this node
 
 	data     []byte           // TypeFile
 	children map[string]*node // TypeDirectory
@@ -90,6 +91,10 @@ type MemFS struct {
 	mu       sync.RWMutex
 	root     *node
 	watchers map[*watcher]struct{}
+
+	// usedBytes is the total file content of every linked node, kept up to
+	// date on each change so StatFS is O(1).
+	usedBytes int64
 }
 
 var (
@@ -113,8 +118,36 @@ func New() *MemFS {
 			modTime:  time.Now(),
 			children: map[string]*node{},
 			version:  1,
+			nlink:    1,
 		},
 		watchers: map[*watcher]struct{}{},
+	}
+}
+
+// setDataLocked replaces n's content, keeping usedBytes current. Content of
+// an unlinked node (still reachable through an open handle) is not counted.
+// Callers must hold m.mu for writing.
+func (m *MemFS) setDataLocked(n *node, data []byte) {
+	if n.nlink > 0 {
+		m.usedBytes += int64(len(data)) - int64(len(n.data))
+	}
+	n.data = data
+}
+
+// linkLocked records one more directory entry referring to n.
+func (m *MemFS) linkLocked(n *node) { n.nlink++ }
+
+// unlinkLocked drops one directory entry referring to n. When the last one
+// goes, n's content (and, for a directory, its whole subtree) stops counting
+// toward usedBytes. Callers must hold m.mu for writing.
+func (m *MemFS) unlinkLocked(n *node) {
+	n.nlink--
+	if n.nlink > 0 {
+		return
+	}
+	m.usedBytes -= int64(len(n.data))
+	for _, c := range n.children {
+		m.unlinkLocked(c)
 	}
 }
 
@@ -231,7 +264,7 @@ func (m *MemFS) Open(ctx context.Context, path string, opts simplefs.OpenOptions
 		return nil, patherr("open", p, simplefs.ErrNotSupported)
 	}
 	if opts.Truncate && len(n.data) > 0 {
-		n.data = nil
+		m.setDataLocked(n, nil)
 		n.modTime = time.Now()
 		n.bump()
 		m.event(simplefs.EventModify, p, "", n)
@@ -246,7 +279,7 @@ func (m *MemFS) createFileLocked(p string, mode simplefs.FileMode) (*node, error
 	if err != nil {
 		return nil, err
 	}
-	n := &node{typ: simplefs.TypeFile, mode: mode, modTime: time.Now(), version: 1}
+	n := &node{typ: simplefs.TypeFile, mode: mode, modTime: time.Now(), version: 1, nlink: 1}
 	parent.children[name] = n
 	parent.modTime = n.modTime
 	parent.bump()
@@ -275,7 +308,7 @@ func (m *MemFS) Create(ctx context.Context, path string, opts simplefs.CreateOpt
 			return nil, patherr("create", p, simplefs.ErrNotSupported)
 		}
 		if len(n.data) > 0 {
-			n.data = nil
+			m.setDataLocked(n, nil)
 			n.modTime = time.Now()
 			n.bump()
 			m.event(simplefs.EventModify, p, "", n)
@@ -360,6 +393,7 @@ func (m *MemFS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptio
 		modTime:  time.Now(),
 		children: map[string]*node{},
 		version:  1,
+		nlink:    1,
 	}
 	parent.children[name] = n
 	parent.modTime = n.modTime
@@ -397,6 +431,7 @@ func (m *MemFS) Remove(ctx context.Context, path string, opts simplefs.RemoveOpt
 		return patherr("remove", p, simplefs.ErrNotEmpty)
 	}
 	delete(parent.children, name)
+	m.unlinkLocked(n)
 	parent.modTime = time.Now()
 	parent.bump()
 	m.event(simplefs.EventDelete, p, "", n)
@@ -432,7 +467,8 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 	if err != nil {
 		return patherr("rename", np, err)
 	}
-	if dst, ok := dstParent.children[dstName]; ok {
+	dst, replacing := dstParent.children[dstName]
+	if replacing {
 		if !opts.Overwrite {
 			return patherr("rename", np, simplefs.ErrExist)
 		}
@@ -449,6 +485,9 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 
 	delete(srcParent.children, srcName)
 	dstParent.children[dstName] = src
+	if replacing {
+		m.unlinkLocked(dst)
+	}
 	now := time.Now()
 	srcParent.modTime, dstParent.modTime = now, now
 	srcParent.bump()
@@ -487,7 +526,7 @@ func (m *MemFS) Symlink(ctx context.Context, target, linkPath string) error {
 	if _, ok := parent.children[name]; ok {
 		return patherr("symlink", p, simplefs.ErrExist)
 	}
-	n := &node{typ: simplefs.TypeSymlink, mode: 0o777, modTime: time.Now(), target: target, version: 1}
+	n := &node{typ: simplefs.TypeSymlink, mode: 0o777, modTime: time.Now(), target: target, version: 1, nlink: 1}
 	parent.children[name] = n
 	parent.modTime = n.modTime
 	parent.bump()
@@ -517,6 +556,7 @@ func (m *MemFS) Link(ctx context.Context, existingPath, newPath string) error {
 		return patherr("link", np, simplefs.ErrExist)
 	}
 	parent.children[name] = n
+	m.linkLocked(n)
 	parent.modTime = time.Now()
 	parent.bump()
 	m.event(simplefs.EventCreate, np, "", n)
@@ -627,17 +667,8 @@ func (m *MemFS) RemoveXattr(ctx context.Context, path, name string) error {
 // the bytes currently stored.
 func (m *MemFS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var usedBytes uint64
-	var visit func(*node)
-	visit = func(n *node) {
-		usedBytes += uint64(len(n.data))
-		for _, c := range n.children {
-			visit(c)
-		}
-	}
-	visit(m.root)
+	usedBytes := uint64(m.usedBytes)
+	m.mu.RUnlock()
 
 	const totalBlocks = (1 << 30) / blockSize
 	used := (usedBytes + blockSize - 1) / blockSize
@@ -744,7 +775,7 @@ func (h *handle) WriteAt(p []byte, off int64) (int, error) {
 		off = int64(len(h.n.data))
 	}
 	if end := off + int64(len(p)); end > int64(len(h.n.data)) {
-		h.n.data = resize(h.n.data, end)
+		h.m.setDataLocked(h.n, resize(h.n.data, end))
 	}
 	copy(h.n.data[off:], p)
 	h.n.modTime = time.Now()
@@ -774,7 +805,7 @@ func (h *handle) Truncate(ctx context.Context, size int64) error {
 	if size == int64(len(h.n.data)) {
 		return nil
 	}
-	h.n.data = resize(h.n.data, size)
+	h.m.setDataLocked(h.n, resize(h.n.data, size))
 	h.n.modTime = time.Now()
 	h.n.bump()
 	h.m.event(simplefs.EventModify, h.path, "", h.n)
