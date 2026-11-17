@@ -33,8 +33,19 @@ const (
 	nfsErrBadType     = 10007
 )
 
-// errStatus translates a provider error into an nfsstat3 code.
-func errStatus(err error) uint32 {
+// errStatus translates a provider error into an nfsstat3 code, logging
+// errors that have no precise NFS equivalent (they reach the client as EIO,
+// so the log is the only place their cause survives).
+func (s *Server) errStatus(err error) uint32 {
+	st := statusOf(err)
+	if st == nfsErrIO {
+		s.log.Warn("nfs: provider error reported as EIO", "err", err)
+	}
+	return st
+}
+
+// statusOf translates a provider error into an nfsstat3 code.
+func statusOf(err error) uint32 {
 	switch {
 	case err == nil:
 		return nfsOK

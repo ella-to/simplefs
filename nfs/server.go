@@ -23,10 +23,12 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"ella.to/simplefs"
 )
@@ -48,6 +50,15 @@ type Options struct {
 	// options. If port 111 cannot be bound (privileges, rpcbind already
 	// running) Start fails.
 	Portmap bool
+
+	// Logger receives operational messages: listeners starting and
+	// stopping, bind failures, and provider errors that reach clients as a
+	// generic I/O error. Nil discards them.
+	Logger *slog.Logger
+
+	// HandleIdle is how long an open provider handle stays cached after its
+	// last READ/WRITE before it is closed. Zero means 5s.
+	HandleIdle time.Duration
 }
 
 func portmapErr(err error) error {
@@ -60,6 +71,7 @@ type Server struct {
 	p    simplefs.FileProvider
 	ctx  context.Context
 	opts Options
+	log  *slog.Logger
 
 	fh    *fhTable
 	files *openCache
@@ -90,12 +102,17 @@ type Server struct {
 // NewServer wraps p. Serve traffic with ListenAndServe (or Serve/ServeUDP on
 // listeners you manage yourself), and Close when done.
 func NewServer(p simplefs.FileProvider, opts Options) *Server {
+	log := opts.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	s := &Server{
 		p:          p,
 		ctx:        context.Background(),
 		opts:       opts,
+		log:        log,
 		fh:         newFHTable(),
-		files:      newOpenCache(p, 0),
+		files:      newOpenCache(p, opts.HandleIdle),
 		createVerf: map[string][8]byte{},
 		conns:      map[net.Conn]struct{}{},
 		done:       make(chan struct{}),
@@ -162,6 +179,7 @@ func (s *Server) ListenAndServe(addr string) error {
 func (s *Server) Start(addr string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		s.log.Error("nfs: listen failed", "addr", addr, "err", err)
 		return err
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
@@ -190,6 +208,7 @@ func (s *Server) Start(addr string) error {
 		if err != nil {
 			ln.Close()
 			s.Close()
+			s.log.Error("nfs: portmap bind failed", "err", err)
 			return portmapErr(err)
 		}
 		ppc, err := net.ListenPacket("udp", net.JoinHostPort(host, "111"))
@@ -197,6 +216,7 @@ func (s *Server) Start(addr string) error {
 			pln.Close()
 			ln.Close()
 			s.Close()
+			s.log.Error("nfs: portmap bind failed", "err", err)
 			return portmapErr(err)
 		}
 		if s.track(pln, ppc) {
@@ -210,6 +230,7 @@ func (s *Server) Start(addr string) error {
 		return ErrServerClosed
 	}
 	go s.acceptLoop(ln)
+	s.log.Info("nfs: serving", "addr", ln.Addr().String(), "portmap", s.opts.Portmap)
 	return nil
 }
 
@@ -337,6 +358,7 @@ func (s *Server) Close() error {
 	}
 	s.wg.Wait()
 	s.files.shutdown()
+	s.log.Info("nfs: server closed")
 	return nil
 }
 

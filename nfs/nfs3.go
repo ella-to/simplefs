@@ -129,7 +129,7 @@ func (s *Server) opGetattr(r *xdrReader, w *xdrWriter) {
 	}
 	info, err := s.p.Stat(s.ctx, path)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		return
 	}
 	w.uint32(nfsOK)
@@ -149,7 +149,7 @@ func (s *Server) opSetattr(r *xdrReader, w *xdrWriter) {
 		return
 	}
 	if err := s.applySattr(path, id, attr); err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.wccData(w, path, id)
 		return
 	}
@@ -181,7 +181,7 @@ func (s *Server) opLookup(r *xdrReader, w *xdrWriter) {
 	}
 	info, err := s.p.Stat(s.ctx, path)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.postOpAttr(w, dir, dirID)
 		return
 	}
@@ -212,7 +212,7 @@ func (s *Server) opAccess(r *xdrReader, w *xdrWriter) {
 	}
 	info, err := s.p.Stat(s.ctx, path)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		postOpNone(w)
 		return
 	}
@@ -264,7 +264,7 @@ func (s *Server) opReadlink(r *xdrReader, w *xdrWriter) {
 	}
 	target, err := sp.Readlink(s.ctx, path)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.postOpAttr(w, path, id)
 		return
 	}
@@ -287,7 +287,7 @@ func (s *Server) opRead(r *xdrReader, w *xdrWriter) {
 	}
 	h, release, err := s.files.acquire(s.ctx, id, path, false)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		postOpNone(w)
 		return
 	}
@@ -295,7 +295,7 @@ func (s *Server) opRead(r *xdrReader, w *xdrWriter) {
 	buf := make([]byte, count)
 	n, rerr := h.ReadAt(buf, int64(offset))
 	if rerr != nil && rerr != io.EOF {
-		w.uint32(errStatus(rerr))
+		w.uint32(s.errStatus(rerr))
 		s.postOpAttr(w, path, id)
 		return
 	}
@@ -339,21 +339,21 @@ func (s *Server) opWrite(r *xdrReader, w *xdrWriter) {
 	}
 	h, release, err := s.files.acquire(s.ctx, id, path, true)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		wccNone(w)
 		return
 	}
 	defer release()
 	n, werr := h.WriteAt(data, int64(offset))
 	if werr != nil {
-		w.uint32(errStatus(werr))
+		w.uint32(s.errStatus(werr))
 		s.wccData(w, path, id)
 		return
 	}
 	committed := uint32(writeUnstable)
 	if stable != writeUnstable {
 		if err := h.Sync(s.ctx); err != nil {
-			w.uint32(errStatus(err))
+			w.uint32(s.errStatus(err))
 			s.wccData(w, path, id)
 			return
 		}
@@ -414,7 +414,7 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 	}
 	h, err := s.p.Create(s.ctx, path, simplefs.CreateOptions{Mode: mode})
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.wccData(w, dir, dirID)
 		return
 	}
@@ -426,7 +426,7 @@ func (s *Server) opCreate(r *xdrReader, w *xdrWriter) {
 		// Create already truncated the file to zero; only a non-zero size
 		// needs another round trip.
 		if err := s.applySattr(path, id, sattr3{setSize: true, size: attr.size}); err != nil {
-			w.uint32(errStatus(err))
+			w.uint32(s.errStatus(err))
 			s.wccData(w, dir, dirID)
 			return
 		}
@@ -461,7 +461,7 @@ func (s *Server) opMkdir(r *xdrReader, w *xdrWriter) {
 		mode = simplefs.FileMode(attr.mode)
 	}
 	if err := s.p.Mkdir(s.ctx, path, simplefs.MkdirOptions{Mode: mode}); err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.wccData(w, dir, dirID)
 		return
 	}
@@ -489,7 +489,7 @@ func (s *Server) opSymlink(r *xdrReader, w *xdrWriter) {
 	}
 	path := simplefs.JoinPath(dir, name)
 	if err := sp.Symlink(s.ctx, target, path); err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.wccData(w, dir, dirID)
 		return
 	}
@@ -522,7 +522,7 @@ func (s *Server) opRemove(r *xdrReader, w *xdrWriter, wantDir bool) {
 		}
 	}
 	if err := s.p.Remove(s.ctx, path, simplefs.RemoveOptions{}); err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.wccData(w, dir, dirID)
 		return
 	}
@@ -560,7 +560,7 @@ func (s *Server) opRename(r *xdrReader, w *xdrWriter) {
 	newPath := simplefs.JoinPath(toDir, toName)
 	if oldPath != newPath {
 		if err := s.p.Rename(s.ctx, oldPath, newPath, simplefs.RenameOptions{Overwrite: true}); err != nil {
-			w.uint32(errStatus(err))
+			w.uint32(s.errStatus(err))
 			s.wccData(w, fromDir, fromDirID)
 			s.wccData(w, toDir, toDirID)
 			return
@@ -602,7 +602,7 @@ func (s *Server) opLink(r *xdrReader, w *xdrWriter) {
 	}
 	newPath := simplefs.JoinPath(dir, name)
 	if err := hp.Link(s.ctx, path, newPath); err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.postOpAttr(w, path, id)
 		s.wccData(w, dir, dirID)
 		return
@@ -671,7 +671,7 @@ func (s *Server) opReaddir(r *xdrReader, w *xdrWriter, plus bool) {
 	}
 	entries, err := s.listDir(dir, dirID)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.postOpAttr(w, dir, dirID)
 		return
 	}
@@ -819,14 +819,14 @@ func (s *Server) opCommit(r *xdrReader, w *xdrWriter) {
 	}
 	h, release, err := s.files.acquire(s.ctx, id, path, true)
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		wccNone(w)
 		return
 	}
 	err = h.Sync(s.ctx)
 	release()
 	if err != nil {
-		w.uint32(errStatus(err))
+		w.uint32(s.errStatus(err))
 		s.wccData(w, path, id)
 		return
 	}

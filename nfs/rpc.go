@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 )
@@ -113,10 +114,16 @@ func replyRPCMismatch(xid uint32) []byte {
 func (s *Server) dispatch(msg []byte) []byte {
 	c, err := decodeCall(msg)
 	if c == nil {
+		if err != nil {
+			s.log.Debug("nfs: dropping malformed RPC", "err", err)
+		}
 		return nil
 	}
 	if err != nil {
 		return replyRPCMismatch(c.xid)
+	}
+	if s.log.Enabled(s.ctx, slog.LevelDebug) {
+		s.log.Debug("nfs: call", "xid", c.xid, "prog", c.prog, "vers", c.vers, "proc", c.proc)
 	}
 	switch c.prog {
 	case progPortmap:
