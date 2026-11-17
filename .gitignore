@@ -1,0 +1,10 @@
+# Build output
+build/
+*.a
+*.test
+*.out
+
+# Local tooling
+.claude/settings.local.json
+.DS_Store
+graphify-out/
