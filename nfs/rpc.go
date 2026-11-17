@@ -1,0 +1,210 @@
+package nfs
+
+// ONC RPC v2 (RFC 5531) message handling: TCP record marking, UDP datagrams,
+// call decoding, and reply construction. The Server dispatches by program
+// number to the PORTMAP, MOUNT, NFS, and NLM implementations.
+
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+)
+
+// RPC program numbers served.
+const (
+	progPortmap = 100000 // v2
+	progNFS     = 100003 // v3
+	progMount   = 100005 // v3
+	progNLM     = 100021 // v4
+)
+
+// RPC message types and status codes.
+const (
+	msgCall  = 0
+	msgReply = 1
+
+	replyAccepted = 0
+	replyDenied   = 1
+
+	acceptSuccess      = 0
+	acceptProgUnavail  = 1
+	acceptProgMismatch = 2
+	acceptProcUnavail  = 3
+	acceptGarbageArgs  = 4
+
+	rejectRPCMismatch = 0
+
+	authNone = 0
+	authUnix = 1
+)
+
+// rpcCall is one decoded RPC call: header fields plus a reader positioned at
+// the start of the procedure arguments.
+type rpcCall struct {
+	xid  uint32
+	prog uint32
+	vers uint32
+	proc uint32
+	args *xdrReader
+}
+
+// decodeCall parses an RPC message. It returns nil (and no error) for
+// non-call messages, which are silently dropped.
+func decodeCall(msg []byte) (*rpcCall, error) {
+	r := newReader(msg)
+	c := &rpcCall{xid: r.uint32()}
+	if mtype := r.uint32(); mtype != msgCall {
+		return nil, nil
+	}
+	if rpcvers := r.uint32(); rpcvers != 2 {
+		return c, fmt.Errorf("rpc version %d", rpcvers)
+	}
+	c.prog = r.uint32()
+	c.vers = r.uint32()
+	c.proc = r.uint32()
+	r.uint32()     // cred flavor (AUTH_UNIX/AUTH_NONE — accepted either way)
+	r.skipOpaque() // cred body
+	r.uint32()     // verf flavor
+	r.skipOpaque() // verf body
+	if r.err != nil {
+		return nil, r.err
+	}
+	c.args = r
+	return c, nil
+}
+
+// replyHeader writes the standard accepted-reply header up to and including
+// accept_stat; for acceptSuccess the procedure results follow.
+func replyHeader(xid, stat uint32) *xdrWriter {
+	w := newWriter()
+	w.uint32(xid)
+	w.uint32(msgReply)
+	w.uint32(replyAccepted)
+	w.uint32(authNone) // verifier
+	w.uint32(0)
+	w.uint32(stat)
+	return w
+}
+
+// replyProgMismatch reports that only version v of the program is served.
+func replyProgMismatch(xid, v uint32) []byte {
+	w := replyHeader(xid, acceptProgMismatch)
+	w.uint32(v)
+	w.uint32(v)
+	return w.bytes()
+}
+
+// replyRPCMismatch is the denied reply for an unsupported RPC version.
+func replyRPCMismatch(xid uint32) []byte {
+	w := newWriter()
+	w.uint32(xid)
+	w.uint32(msgReply)
+	w.uint32(replyDenied)
+	w.uint32(rejectRPCMismatch)
+	w.uint32(2)
+	w.uint32(2)
+	return w.bytes()
+}
+
+// dispatch routes one RPC message to the program implementation and returns
+// the encoded reply (nil to send nothing).
+func (s *Server) dispatch(msg []byte) []byte {
+	c, err := decodeCall(msg)
+	if c == nil {
+		return nil
+	}
+	if err != nil {
+		return replyRPCMismatch(c.xid)
+	}
+	switch c.prog {
+	case progPortmap:
+		if c.vers != 2 {
+			return replyProgMismatch(c.xid, 2)
+		}
+		return s.portmapProc(c)
+	case progMount:
+		if c.vers != 3 {
+			return replyProgMismatch(c.xid, 3)
+		}
+		return s.mountProc(c)
+	case progNFS:
+		if c.vers != 3 {
+			return replyProgMismatch(c.xid, 3)
+		}
+		return s.nfsProc(c)
+	case progNLM:
+		if c.vers != 4 {
+			return replyProgMismatch(c.xid, 4)
+		}
+		return s.nlmProc(c)
+	default:
+		return replyHeader(c.xid, acceptProgUnavail).bytes()
+	}
+}
+
+// maxRecord bounds a single RPC record; the largest legitimate messages are
+// WRITE calls of wtmax bytes plus headers.
+const maxRecord = maxIO + 4096
+
+// serveConn handles one TCP connection: reads records (reassembling
+// fragments), dispatches each call on its own goroutine, and serializes the
+// replies. NFS clients pipeline requests, so concurrent handling matters.
+func (s *Server) serveConn(conn net.Conn) {
+	defer conn.Close()
+	var wmu sync.Mutex
+	var hdr [4]byte
+	for {
+		var record []byte
+		for {
+			if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+				return
+			}
+			mark := binary.BigEndian.Uint32(hdr[:])
+			n := int(mark & 0x7fffffff)
+			if n > maxRecord || len(record)+n > maxRecord {
+				return
+			}
+			frag := make([]byte, n)
+			if _, err := io.ReadFull(conn, frag); err != nil {
+				return
+			}
+			record = append(record, frag...)
+			if mark&0x80000000 != 0 {
+				break
+			}
+		}
+		go func(msg []byte) {
+			reply := s.dispatch(msg)
+			if reply == nil {
+				return
+			}
+			out := make([]byte, 4+len(reply))
+			binary.BigEndian.PutUint32(out, 0x80000000|uint32(len(reply)))
+			copy(out[4:], reply)
+			wmu.Lock()
+			conn.Write(out)
+			wmu.Unlock()
+		}(record)
+	}
+}
+
+// servePacket handles a UDP socket: one datagram per call, one per reply.
+// Windows' NFS client and rpcbind probes use UDP.
+func (s *Server) servePacket(pc net.PacketConn) {
+	buf := make([]byte, 65536)
+	for {
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		msg := make([]byte, n)
+		copy(msg, buf[:n])
+		go func(msg []byte, addr net.Addr) {
+			if reply := s.dispatch(msg); reply != nil {
+				pc.WriteTo(reply, addr)
+			}
+		}(msg, addr)
+	}
+}

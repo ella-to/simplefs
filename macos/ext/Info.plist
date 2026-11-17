@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>FileProviderExt</string>
+    <key>CFBundleIdentifier</key>
+    <string>to.ella.simplefs.ext</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>FileProviderExt</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <!-- Finder sidebar icon for this provider's domains. CFBundleSymbolName is
+         an SF Symbol name (see https://developer.apple.com/sf-symbols/); it
+         replaces the default hexagon. It applies to every domain this extension
+         serves, so per-mount icons would need separate extension bundles.
+         Re-sign and `killall Finder` to see a change. -->
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleSymbolName</key>
+            <string>externaldrive.fill.badge.icloud</string>
+        </dict>
+    </dict>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.fileprovider-nonui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>FileProviderExtension</string>
+        <key>NSExtensionFileProviderSupportsEnumeration</key>
+        <true/>
+        <key>NSExtensionFileProviderDocumentGroup</key>
+        <string>group.to.ella.simplefs</string>
+    </dict>
+</dict>
+</plist>

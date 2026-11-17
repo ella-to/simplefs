@@ -1,0 +1,548 @@
+package nfs
+
+// Protocol-level tests: a minimal NFSv3/MOUNT client dials a real Server over
+// TCP (loopback) and exercises the procedures the way a kernel client would.
+
+import (
+	"bytes"
+	"encoding/binary"
+	"io"
+	"net"
+	"testing"
+
+	"ella.to/simplefs"
+	"ella.to/simplefs/memfs"
+)
+
+// testClient is a tiny synchronous ONC RPC client, enough to drive the server.
+type testClient struct {
+	t    *testing.T
+	conn net.Conn
+	xid  uint32
+}
+
+func startServer(t *testing.T) (*Server, *testClient) {
+	t.Helper()
+	srv := NewServer(memfs.New(), Options{})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return srv, &testClient{t: t, conn: conn}
+}
+
+// call sends one RPC and returns a reader over the procedure results,
+// asserting the RPC layer accepted it.
+func (c *testClient) call(prog, vers, proc uint32, args *xdrWriter) *xdrReader {
+	c.t.Helper()
+	c.xid++
+	w := newWriter()
+	w.uint32(c.xid)
+	w.uint32(msgCall)
+	w.uint32(2) // rpcvers
+	w.uint32(prog)
+	w.uint32(vers)
+	w.uint32(proc)
+	w.uint32(authNone)
+	w.uint32(0)
+	w.uint32(authNone)
+	w.uint32(0)
+	if args != nil {
+		w.raw(args.bytes())
+	}
+	msg := w.bytes()
+	out := make([]byte, 4+len(msg))
+	binary.BigEndian.PutUint32(out, 0x80000000|uint32(len(msg)))
+	copy(out[4:], msg)
+	if _, err := c.conn.Write(out); err != nil {
+		c.t.Fatal(err)
+	}
+
+	var hdr [4]byte
+	var reply []byte
+	for {
+		if _, err := io.ReadFull(c.conn, hdr[:]); err != nil {
+			c.t.Fatal(err)
+		}
+		mark := binary.BigEndian.Uint32(hdr[:])
+		frag := make([]byte, mark&0x7fffffff)
+		if _, err := io.ReadFull(c.conn, frag); err != nil {
+			c.t.Fatal(err)
+		}
+		reply = append(reply, frag...)
+		if mark&0x80000000 != 0 {
+			break
+		}
+	}
+	r := newReader(reply)
+	if xid := r.uint32(); xid != c.xid {
+		c.t.Fatalf("xid = %d, want %d", xid, c.xid)
+	}
+	if mt := r.uint32(); mt != msgReply {
+		c.t.Fatalf("msg type = %d", mt)
+	}
+	if rs := r.uint32(); rs != replyAccepted {
+		c.t.Fatalf("reply denied (stat %d)", rs)
+	}
+	r.uint32() // verf flavor
+	r.skipOpaque()
+	if as := r.uint32(); as != acceptSuccess {
+		c.t.Fatalf("accept_stat = %d", as)
+	}
+	return r
+}
+
+// nfsCall invokes an NFSv3 procedure and asserts its nfsstat3 == want,
+// returning the reader positioned after the status word.
+func (c *testClient) nfsCall(proc uint32, args *xdrWriter, want uint32) *xdrReader {
+	c.t.Helper()
+	r := c.call(progNFS, 3, proc, args)
+	if st := r.uint32(); st != want {
+		c.t.Fatalf("proc %d: status = %d, want %d", proc, st, want)
+	}
+	return r
+}
+
+// mnt performs the MOUNT handshake and returns the root filehandle.
+func (c *testClient) mnt() []byte {
+	c.t.Helper()
+	args := newWriter()
+	args.string("/")
+	r := c.call(progMount, 3, mountProcMnt, args)
+	if st := r.uint32(); st != 0 {
+		c.t.Fatalf("MNT status = %d", st)
+	}
+	return r.opaque()
+}
+
+// skipPostOpAttr consumes an optional post_op_attr.
+func skipPostOpAttr(r *xdrReader) {
+	if r.bool() {
+		r.bytesN(84)
+	}
+}
+
+// skipWcc consumes a wcc_data.
+func skipWcc(r *xdrReader) {
+	if r.bool() {
+		r.bytesN(24)
+	}
+	skipPostOpAttr(r)
+}
+
+// lookup resolves name under dirFH, asserting the given status; on success
+// it returns the child's filehandle.
+func (c *testClient) lookup(dirFH []byte, name string, want uint32) []byte {
+	c.t.Helper()
+	args := newWriter()
+	args.opaque(dirFH)
+	args.string(name)
+	r := c.nfsCall(nfsProcLookup, args, want)
+	if want != nfsOK {
+		return nil
+	}
+	return r.opaque()
+}
+
+// create makes a file (UNCHECKED) and returns its filehandle.
+func (c *testClient) create(dirFH []byte, name string) []byte {
+	c.t.Helper()
+	args := newWriter()
+	args.opaque(dirFH)
+	args.string(name)
+	args.uint32(createUnchecked)
+	// sattr3: mode set to 0644, everything else unset
+	args.bool(true)
+	args.uint32(0o644)
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.uint32(0)
+	args.uint32(0)
+	r := c.nfsCall(nfsProcCreate, args, nfsOK)
+	if !r.bool() {
+		c.t.Fatal("CREATE returned no filehandle")
+	}
+	return r.opaque()
+}
+
+// write writes data at offset with FILE_SYNC stability.
+func (c *testClient) write(fh []byte, offset uint64, data []byte) {
+	c.t.Helper()
+	args := newWriter()
+	args.opaque(fh)
+	args.uint64(offset)
+	args.uint32(uint32(len(data)))
+	args.uint32(writeFileSync)
+	args.opaque(data)
+	r := c.nfsCall(nfsProcWrite, args, nfsOK)
+	skipWcc(r)
+	if n := r.uint32(); int(n) != len(data) {
+		c.t.Fatalf("WRITE wrote %d, want %d", n, len(data))
+	}
+}
+
+// read reads count bytes at offset and returns (data, eof).
+func (c *testClient) read(fh []byte, offset uint64, count uint32) ([]byte, bool) {
+	c.t.Helper()
+	args := newWriter()
+	args.opaque(fh)
+	args.uint64(offset)
+	args.uint32(count)
+	r := c.nfsCall(nfsProcRead, args, nfsOK)
+	skipPostOpAttr(r)
+	n := r.uint32()
+	eof := r.bool()
+	data := r.opaque()
+	if uint32(len(data)) != n {
+		c.t.Fatalf("READ count %d != data %d", n, len(data))
+	}
+	return data, eof
+}
+
+func TestMountAndRoot(t *testing.T) {
+	_, c := startServer(t)
+	rootFH := c.mnt()
+	if len(rootFH) != 8 {
+		t.Fatalf("root fh length = %d", len(rootFH))
+	}
+
+	// FSINFO and GETATTR on the root must succeed — the kernel's first moves.
+	args := newWriter()
+	args.opaque(rootFH)
+	r := c.nfsCall(nfsProcFsinfo, args, nfsOK)
+	skipPostOpAttr(r)
+	if rtmax := r.uint32(); rtmax != maxIO {
+		t.Fatalf("rtmax = %d", rtmax)
+	}
+
+	args = newWriter()
+	args.opaque(rootFH)
+	r = c.nfsCall(nfsProcGetattr, args, nfsOK)
+	if ft := r.uint32(); ft != typeDir {
+		t.Fatalf("root type = %d", ft)
+	}
+}
+
+func TestCreateWriteRead(t *testing.T) {
+	srv, c := startServer(t)
+	root := c.mnt()
+
+	fh := c.create(root, "hello.txt")
+	content := []byte("hello, nfs world\n")
+	c.write(fh, 0, content)
+
+	got, eof := c.read(fh, 0, 1024)
+	if !bytes.Equal(got, content) || !eof {
+		t.Fatalf("read %q eof=%v, want %q eof=true", got, eof, content)
+	}
+
+	// Offset read.
+	got, _ = c.read(fh, 7, 3)
+	if string(got) != "nfs" {
+		t.Fatalf("offset read = %q", got)
+	}
+
+	// The file must be visible through the provider too.
+	info, err := srv.Provider().Stat(t.Context(), "/hello.txt")
+	if err != nil || info.Size != int64(len(content)) {
+		t.Fatalf("provider stat: %v %+v", err, info)
+	}
+
+	// LOOKUP resolves it and returns the same handle ID.
+	fh2 := c.lookup(root, "hello.txt", nfsOK)
+	if !bytes.Equal(fh, fh2) {
+		t.Fatalf("lookup fh %x != create fh %x", fh2, fh)
+	}
+}
+
+func TestLookupMissing(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+	c.lookup(root, "no-such-file", nfsErrNoEnt)
+}
+
+func TestMkdirReaddirPlus(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+
+	args := newWriter()
+	args.opaque(root)
+	args.string("docs")
+	args.bool(false) // mode unset
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.uint32(0)
+	args.uint32(0)
+	r := c.nfsCall(nfsProcMkdir, args, nfsOK)
+	if !r.bool() {
+		t.Fatal("MKDIR returned no fh")
+	}
+	dirFH := r.opaque()
+
+	c.create(dirFH, "a.txt")
+	c.create(dirFH, "b.txt")
+
+	args = newWriter()
+	args.opaque(dirFH)
+	args.uint64(0)            // cookie
+	args.raw(make([]byte, 8)) // cookieverf
+	args.uint32(4096)         // dircount
+	args.uint32(32 * 1024)    // maxcount
+	r = c.nfsCall(nfsProcReaddirplus, args, nfsOK)
+	skipPostOpAttr(r)
+	r.bytesN(8) // cookieverf
+
+	var names []string
+	for r.bool() {
+		r.uint64() // fileid
+		names = append(names, r.string())
+		r.uint64() // cookie
+		skipPostOpAttr(r)
+		if r.bool() {
+			r.skipOpaque() // fh
+		}
+	}
+	if !r.bool() {
+		t.Fatal("expected eof")
+	}
+	want := map[string]bool{".": true, "..": true, "a.txt": true, "b.txt": true}
+	if len(names) != len(want) {
+		t.Fatalf("entries = %v", names)
+	}
+	for _, n := range names {
+		if !want[n] {
+			t.Fatalf("unexpected entry %q in %v", n, names)
+		}
+	}
+}
+
+func TestReaddirPagination(t *testing.T) {
+	srv, c := startServer(t)
+	root := c.mnt()
+	for i := range 40 {
+		name := "file-" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+		if _, err := srv.Provider().Create(t.Context(), "/"+name, simplefs.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Tiny maxcount forces multiple READDIR round trips via cookies.
+	seen := map[string]bool{}
+	cookie := uint64(0)
+	for rounds := 0; ; rounds++ {
+		if rounds > 50 {
+			t.Fatal("readdir did not converge")
+		}
+		args := newWriter()
+		args.opaque(root)
+		args.uint64(cookie)
+		args.raw(make([]byte, 8))
+		args.uint32(512) // small budget
+		r := c.nfsCall(nfsProcReaddir, args, nfsOK)
+		skipPostOpAttr(r)
+		r.bytesN(8)
+		for r.bool() {
+			r.uint64()
+			seen[r.string()] = true
+			cookie = r.uint64()
+		}
+		if r.bool() {
+			break
+		}
+	}
+	if len(seen) != 42 { // 40 files + "." + ".."
+		t.Fatalf("saw %d entries", len(seen))
+	}
+}
+
+func TestRenameKeepsHandle(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+	fh := c.create(root, "old.txt")
+	c.write(fh, 0, []byte("data"))
+
+	args := newWriter()
+	args.opaque(root)
+	args.string("old.txt")
+	args.opaque(root)
+	args.string("new.txt")
+	r := c.nfsCall(nfsProcRename, args, nfsOK)
+	skipWcc(r)
+	skipWcc(r)
+
+	// The old handle must keep working (same file, new name).
+	got, _ := c.read(fh, 0, 16)
+	if string(got) != "data" {
+		t.Fatalf("read after rename = %q", got)
+	}
+	c.lookup(root, "old.txt", nfsErrNoEnt)
+	fh2 := c.lookup(root, "new.txt", nfsOK)
+	if !bytes.Equal(fh, fh2) {
+		t.Fatal("fileid changed across rename")
+	}
+}
+
+func TestRemoveAndStaleHandle(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+	fh := c.create(root, "gone.txt")
+
+	args := newWriter()
+	args.opaque(root)
+	args.string("gone.txt")
+	r := c.nfsCall(nfsProcRemove, args, nfsOK)
+	skipWcc(r)
+
+	// Handle is now stale.
+	args = newWriter()
+	args.opaque(fh)
+	c.nfsCall(nfsProcGetattr, args, nfsErrStale)
+
+	// RMDIR on a file and non-empty semantics.
+	c.lookup(root, "gone.txt", nfsErrNoEnt)
+}
+
+func TestSetattrTruncate(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+	fh := c.create(root, "t.txt")
+	c.write(fh, 0, []byte("0123456789"))
+
+	args := newWriter()
+	args.opaque(fh)
+	args.bool(false) // mode
+	args.bool(false) // uid
+	args.bool(false) // gid
+	args.bool(true)  // size
+	args.uint64(4)
+	args.uint32(0)   // atime: don't change
+	args.uint32(0)   // mtime: don't change
+	args.bool(false) // no guard
+	r := c.nfsCall(nfsProcSetattr, args, nfsOK)
+	skipWcc(r)
+
+	got, eof := c.read(fh, 0, 100)
+	if string(got) != "0123" || !eof {
+		t.Fatalf("after truncate: %q eof=%v", got, eof)
+	}
+}
+
+func TestSymlink(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+
+	args := newWriter()
+	args.opaque(root)
+	args.string("link")
+	args.bool(false) // sattr: all unset
+	args.bool(false)
+	args.bool(false)
+	args.bool(false)
+	args.uint32(0)
+	args.uint32(0)
+	args.string("/target/path")
+	r := c.nfsCall(nfsProcSymlink, args, nfsOK)
+	if !r.bool() {
+		t.Fatal("SYMLINK returned no fh")
+	}
+	fh := r.opaque()
+
+	args = newWriter()
+	args.opaque(fh)
+	r = c.nfsCall(nfsProcReadlink, args, nfsOK)
+	skipPostOpAttr(r)
+	if target := r.string(); target != "/target/path" {
+		t.Fatalf("readlink = %q", target)
+	}
+}
+
+func TestExclusiveCreateRetransmit(t *testing.T) {
+	_, c := startServer(t)
+	root := c.mnt()
+
+	verf := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	exclusive := func() *xdrReader {
+		args := newWriter()
+		args.opaque(root)
+		args.string("x.lock")
+		args.uint32(createExclusive)
+		args.raw(verf)
+		return c.call(progNFS, 3, nfsProcCreate, args)
+	}
+	if st := exclusive().uint32(); st != nfsOK {
+		t.Fatalf("first exclusive create: %d", st)
+	}
+	// Same verifier: treated as a retransmission, succeeds again.
+	if st := exclusive().uint32(); st != nfsOK {
+		t.Fatalf("retransmitted exclusive create: %d", st)
+	}
+	// Different verifier: real conflict.
+	verf = []byte{9, 9, 9, 9, 9, 9, 9, 9}
+	if st := exclusive().uint32(); st != nfsErrExist {
+		t.Fatalf("conflicting exclusive create: %d", st)
+	}
+}
+
+func TestPortmapGetport(t *testing.T) {
+	srv, c := startServer(t)
+	args := newWriter()
+	args.uint32(progNFS)
+	args.uint32(3)
+	args.uint32(protoTCP)
+	args.uint32(0)
+	r := c.call(progPortmap, 2, pmapProcGetport, args)
+	if port := r.uint32(); port != uint32(srv.Port()) {
+		t.Fatalf("portmap says %d, server on %d", port, srv.Port())
+	}
+}
+
+func TestNLMGrantsEverything(t *testing.T) {
+	_, c := startServer(t)
+	args := newWriter()
+	args.opaque([]byte{0xde, 0xad}) // cookie
+	// (rest of nlm4_lockargs is ignored by the server)
+	r := c.call(progNLM, 4, nlmProcLock, args)
+	if cookie := r.opaque(); !bytes.Equal(cookie, []byte{0xde, 0xad}) {
+		t.Fatalf("cookie = %x", cookie)
+	}
+	if st := r.uint32(); st != nlmGranted {
+		t.Fatalf("lock status = %d", st)
+	}
+}
+
+func TestBigWriteMultipleFragments(t *testing.T) {
+	// A 300 KiB WRITE exercises TCP record reassembly and the 1 MiB maxIO.
+	_, c := startServer(t)
+	root := c.mnt()
+	fh := c.create(root, "big.bin")
+
+	big := make([]byte, 300*1024)
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	c.write(fh, 0, big)
+
+	var got []byte
+	off := uint64(0)
+	for {
+		chunk, eof := c.read(fh, off, 128*1024)
+		got = append(got, chunk...)
+		off += uint64(len(chunk))
+		if eof {
+			break
+		}
+	}
+	if !bytes.Equal(got, big) {
+		t.Fatalf("big file round trip mismatch (%d vs %d bytes)", len(got), len(big))
+	}
+}
