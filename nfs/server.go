@@ -124,7 +124,7 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 // statFS queries the provider's StatFSProvider capability, if any, and
 // refreshes the cached read-only state.
 func (s *Server) statFS() (simplefs.FSInfo, bool) {
-	sp, ok := s.p.(simplefs.StatFSProvider)
+	sp, ok := simplefs.As[simplefs.StatFSProvider](s.p)
 	if !ok {
 		return simplefs.FSInfo{}, false
 	}

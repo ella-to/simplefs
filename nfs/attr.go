@@ -256,14 +256,14 @@ func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 		}
 	}
 	if a.setMode {
-		if cp, ok := s.p.(simplefs.ChmodProvider); ok {
+		if cp, ok := simplefs.As[simplefs.ChmodProvider](s.p); ok {
 			if err := cp.Chmod(s.ctx, path, simplefs.FileMode(a.mode)); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
 				return err
 			}
 		}
 	}
 	if a.atimeHow != 0 || a.mtimeHow != 0 {
-		if tp, ok := s.p.(simplefs.ChtimesProvider); ok {
+		if tp, ok := simplefs.As[simplefs.ChtimesProvider](s.p); ok {
 			now := time.Now()
 			atime, mtime := a.atime, a.mtime
 			if a.atimeHow == 1 {

@@ -250,7 +250,7 @@ func (s *Server) opReadlink(r *xdrReader, w *xdrWriter) {
 		postOpNone(w)
 		return
 	}
-	sp, ok := s.p.(simplefs.SymlinkProvider)
+	sp, ok := simplefs.As[simplefs.SymlinkProvider](s.p)
 	if !ok {
 		w.uint32(nfsErrNotSupp)
 		s.postOpAttr(w, path, id)
@@ -475,7 +475,7 @@ func (s *Server) opSymlink(r *xdrReader, w *xdrWriter) {
 		wccNone(w)
 		return
 	}
-	sp, ok := s.p.(simplefs.SymlinkProvider)
+	sp, ok := simplefs.As[simplefs.SymlinkProvider](s.p)
 	if !ok {
 		w.uint32(nfsErrNotSupp)
 		s.wccData(w, dir, dirID)
@@ -587,7 +587,7 @@ func (s *Server) opLink(r *xdrReader, w *xdrWriter) {
 		wccNone(w)
 		return
 	}
-	hp, ok := s.p.(simplefs.HardLinkProvider)
+	hp, ok := simplefs.As[simplefs.HardLinkProvider](s.p)
 	if !ok {
 		w.uint32(nfsErrNotSupp)
 		s.postOpAttr(w, path, id)
@@ -750,13 +750,13 @@ func (s *Server) opFsinfo(r *xdrReader, w *xdrWriter) {
 		return
 	}
 	props := uint32(fsfHomogeneous)
-	if _, ok := s.p.(simplefs.HardLinkProvider); ok {
+	if _, ok := simplefs.As[simplefs.HardLinkProvider](s.p); ok {
 		props |= fsfLink
 	}
-	if _, ok := s.p.(simplefs.SymlinkProvider); ok {
+	if _, ok := simplefs.As[simplefs.SymlinkProvider](s.p); ok {
 		props |= fsfSymlink
 	}
-	if _, ok := s.p.(simplefs.ChtimesProvider); ok {
+	if _, ok := simplefs.As[simplefs.ChtimesProvider](s.p); ok {
 		props |= fsfCansettime
 	}
 	w.uint32(nfsOK)
