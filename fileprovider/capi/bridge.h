@@ -41,16 +41,17 @@ char *ProviderRootJSON(void);
 char *ProviderListJSON(char *parentID);
 char *ProviderItemJSON(char *id);
 
-// Content. Returns the byte buffer (freed with ProviderFree) and writes the
-// length to outLen and the FPCode to outCode. On failure returns NULL; when a
-// message is available *outErr is a C string the caller frees with ProviderFree.
-void *ProviderContent(char *id, int *outLen, int *outCode, char **outErr);
+// Content. Streams the file's content into the local file dstPath and
+// returns a result envelope with the item ({ok,item} or {ok:false,code,msg}).
+char *ProviderFetchToPath(char *id, char *dstPath);
 
-// Mutations. Each returns a JSON result envelope C string freed with ProviderFree.
-char *ProviderCreate(char *name, char *parentID, int isDir, void *data, int n);
+// Mutations. Each returns a JSON result envelope C string freed with
+// ProviderFree. Content is passed as a local file path (srcPath, "" for
+// none) and streamed by the Go side, so it never sits in memory whole.
+char *ProviderCreate(char *name, char *parentID, int isDir, char *srcPath);
 char *ProviderUpdate(char *id, char *newName, char *newParentID,
                      int changedContent, int changedName, int changedParent,
-                     void *data, int n);
+                     char *srcPath);
 char *ProviderDelete(char *id);
 
 void ProviderSetHostDir(char *path);

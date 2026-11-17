@@ -1,9 +1,12 @@
 package fileprovider
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"ella.to/simplefs"
@@ -13,9 +16,20 @@ import (
 // The bridge is exercised end-to-end against memfs through the ID-based
 // calls — the same ones the macOS File Provider extension makes via capi.
 
+// contentFile writes content to a temporary local file, as the system does
+// before handing the extension a URL.
+func contentFile(t *testing.T, content string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "content")
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
 func createFile(t *testing.T, b *Bridge, parentID, name, content string) Item {
 	t.Helper()
-	it, err := b.Create(name, parentID, false, []byte(content))
+	it, err := b.Create(name, parentID, false, contentFile(t, content))
 	if err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
@@ -51,7 +65,7 @@ func TestBridgeLifecycle(t *testing.T) {
 	b := NewBridge(memfs.New())
 
 	// Create a folder and a file inside it.
-	folder, err := b.Create("docs", RootID, true, nil)
+	folder, err := b.Create("docs", RootID, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +96,7 @@ func TestBridgeLifecycle(t *testing.T) {
 	updated, err := b.Update(UpdateRequest{
 		ID:             file.ID,
 		ChangedContent: true,
-		Content:        []byte("rewritten"),
+		ContentPath:    contentFile(t, "rewritten"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +148,7 @@ func (p Perm) has(q Perm) bool { return p&q == q }
 
 func TestBridgeStableIDsAcrossFolderMove(t *testing.T) {
 	b := NewBridge(memfs.New())
-	folder, err := b.Create("a", RootID, true, nil)
+	folder, err := b.Create("a", RootID, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,10 +179,10 @@ func TestBridgeErrorMapping(t *testing.T) {
 		t.Fatalf("stat unknown id = %v, want CodeNotFound", err)
 	}
 
-	if _, err := b.Create("dir", RootID, true, nil); err != nil {
+	if _, err := b.Create("dir", RootID, true, ""); err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.Create("dir", RootID, true, nil)
+	_, err = b.Create("dir", RootID, true, "")
 	if !errors.As(err, &me) || me.Code != CodeNameConflict {
 		t.Fatalf("duplicate folder = %v, want CodeNameConflict", err)
 	}
@@ -229,3 +243,34 @@ func TestCodeOfTable(t *testing.T) {
 		}
 	}
 }
+
+func TestBridgeFetchToStreams(t *testing.T) {
+	b := NewBridge(memfs.New(memfs.WithCapacity(64 << 20)))
+	big := make([]byte, 5<<20+3)
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	src := filepath.Join(t.TempDir(), "src")
+	os.WriteFile(src, big, 0o600)
+	it, err := b.Create("big.bin", RootID, false, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Size != int64(len(big)) {
+		t.Fatalf("created size = %d", it.Size)
+	}
+	dst := filepath.Join(t.TempDir(), "dst")
+	got, err := b.FetchTo(it.ID, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(dst)
+	if got.ID != it.ID || !bytes.Equal(data, big) {
+		t.Fatalf("fetched %d bytes (item %+v), want %d", len(data), got, len(big))
+	}
+	if _, err := b.FetchTo("sfs-999", dst); CodeOfMust(err) != CodeNotFound {
+		t.Fatalf("FetchTo(unknown) = %v", err)
+	}
+}
+
+func CodeOfMust(err error) Code { c, _ := CodeOf(err); return c }

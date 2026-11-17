@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 
 	"ella.to/simplefs"
@@ -61,7 +62,10 @@ type UpdateRequest struct {
 	ChangedParent  bool
 	NewName        string
 	NewParentID    string
-	Content        []byte
+
+	// ContentPath is the local file holding the new content (the URL the
+	// system hands the extension); it is streamed into the provider.
+	ContentPath string
 }
 
 // idFor returns the stable ID for path, assigning one on first sight.
@@ -204,8 +208,63 @@ type handleReader struct {
 
 func (r *handleReader) Close() error { return r.h.Close() }
 
-// Create adds a new file or folder the user created under parentID.
-func (b *Bridge) Create(name, parentID string, dir bool, content []byte) (Item, error) {
+// FetchTo streams the content of the file with the given ID into the local
+// file dst (created or truncated) in fixed-size chunks — memory use does not
+// depend on the file size — and returns the item as of the copy.
+func (b *Bridge) FetchTo(id, dst string) (Item, error) {
+	path, err := b.pathFor(id)
+	if err != nil {
+		return Item{}, err
+	}
+	h, err := b.p.Open(b.ctx, path, simplefs.OpenOptions{Read: true})
+	if err != nil {
+		return Item{}, wrapErr(err)
+	}
+	defer h.Close()
+	info, err := h.Stat(b.ctx)
+	if err != nil {
+		return Item{}, wrapErr(err)
+	}
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return Item{}, &Error{Code: CodeIO, Msg: err.Error()}
+	}
+	buf := make([]byte, chunkSize)
+	if _, err := io.CopyBuffer(f, io.NewSectionReader(h, 0, info.Size), buf); err != nil {
+		f.Close()
+		return Item{}, wrapErr(err)
+	}
+	if err := f.Close(); err != nil {
+		return Item{}, &Error{Code: CodeIO, Msg: err.Error()}
+	}
+	return b.item(info, id), nil
+}
+
+// chunkSize is how much content moves per read/write when streaming.
+const chunkSize = 1 << 20
+
+// writeFrom streams the local file src (empty: no content) into h from
+// offset 0, syncs, and returns the handle's final metadata.
+func writeFrom(ctx context.Context, h simplefs.FileHandle, src string) (simplefs.FileInfo, error) {
+	if src != "" {
+		f, err := os.Open(src)
+		if err != nil {
+			return simplefs.FileInfo{}, err
+		}
+		defer f.Close()
+		if _, err := io.CopyBuffer(io.NewOffsetWriter(h, 0), f, make([]byte, chunkSize)); err != nil {
+			return simplefs.FileInfo{}, err
+		}
+	}
+	if err := h.Sync(ctx); err != nil {
+		return simplefs.FileInfo{}, err
+	}
+	return h.Stat(ctx)
+}
+
+// Create adds a new file or folder the user created under parentID. For a
+// file, contentPath names the local file holding its content ("" for none).
+func (b *Bridge) Create(name, parentID string, dir bool, contentPath string) (Item, error) {
 	parent, err := b.pathFor(parentID)
 	if err != nil {
 		return Item{}, err
@@ -232,7 +291,7 @@ func (b *Bridge) Create(name, parentID string, dir bool, content []byte) (Item, 
 		if err != nil {
 			return Item{}, wrapErr(err)
 		}
-		if info, err = writeAll(b.ctx, h, content); err != nil {
+		if info, err = writeFrom(b.ctx, h, contentPath); err != nil {
 			h.Close()
 			return Item{}, wrapErr(err)
 		}
@@ -256,7 +315,7 @@ func (b *Bridge) Update(req UpdateRequest) (Item, error) {
 		if err != nil {
 			return Item{}, wrapErr(err)
 		}
-		if _, err := writeAll(b.ctx, h, req.Content); err != nil {
+		if _, err := writeFrom(b.ctx, h, req.ContentPath); err != nil {
 			h.Close()
 			return Item{}, wrapErr(err)
 		}
@@ -310,18 +369,4 @@ func (b *Bridge) Delete(id string) error {
 	}
 	b.ids.Forget(path)
 	return nil
-}
-
-// writeAll writes content at offset 0, syncs, and returns the handle's final
-// metadata.
-func writeAll(ctx context.Context, h simplefs.FileHandle, content []byte) (simplefs.FileInfo, error) {
-	if len(content) > 0 {
-		if _, err := h.WriteAt(content, 0); err != nil {
-			return simplefs.FileInfo{}, err
-		}
-	}
-	if err := h.Sync(ctx); err != nil {
-		return simplefs.FileInfo{}, err
-	}
-	return h.Stat(ctx)
 }

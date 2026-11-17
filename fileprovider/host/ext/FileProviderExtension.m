@@ -85,39 +85,21 @@ static void CompleteMutation(char *json,
                                            version:(NSFileProviderItemVersion *)requestedVersion
                                            request:(NSFileProviderRequest *)request
                                  completionHandler:(void (^)(NSURL * _Nullable, NSFileProviderItem _Nullable, NSError * _Nullable))completionHandler {
-    SimpleFSItem *item = [SimpleFSItem itemForIdentifier:itemIdentifier];
-    if (item == nil) {
-        completionHandler(nil, nil, [NSError errorWithDomain:NSFileProviderErrorDomain
-                                                        code:NSFileProviderErrorNoSuchItem
-                                                    userInfo:nil]);
-        return [NSProgress progressWithTotalUnitCount:0];
-    }
-
-    int len = 0, code = 0;
-    char *errMsg = NULL;
-    void *buf = ProviderContent((char *)[itemIdentifier UTF8String], &len, &code, &errMsg);
-    if (buf == NULL) {
-        NSString *msg = errMsg ? [NSString stringWithUTF8String:errMsg] : nil;
-        if (errMsg) {
-            ProviderFree(errMsg);
-        }
-        completionHandler(nil, nil, [SimpleFSItem errorForCode:code message:msg]);
-        return [NSProgress progressWithTotalUnitCount:0];
-    }
-
-    NSData *data = [NSData dataWithBytes:buf length:len];
-    ProviderFree(buf);
-
     NSURL *tmpURL = [[NSFileManager.defaultManager temporaryDirectory]
                         URLByAppendingPathComponent:[NSUUID UUID].UUIDString];
-    NSError *writeErr = nil;
-    if (![data writeToURL:tmpURL options:NSDataWritingAtomic error:&writeErr]) {
-        completionHandler(nil, nil, writeErr);
-        return [NSProgress progressWithTotalUnitCount:0];
+    NSProgress *progress = [NSProgress progressWithTotalUnitCount:1];
+    // Go streams the content straight into the file: nothing is buffered
+    // here, so size is not limited by memory.
+    NSDictionary *res = [SimpleFSItem resultFromGoJSON:
+        ProviderFetchToPath((char *)itemIdentifier.UTF8String, (char *)tmpURL.path.fileSystemRepresentation)];
+    progress.completedUnitCount = 1;
+    if ([res[@"ok"] boolValue] && res[@"item"]) {
+        completionHandler(tmpURL, [SimpleFSItem itemFromDictionary:res[@"item"]], nil);
+    } else {
+        [NSFileManager.defaultManager removeItemAtURL:tmpURL error:nil];
+        completionHandler(nil, nil, [SimpleFSItem errorForCode:[res[@"code"] intValue] message:res[@"msg"]]);
     }
-
-    completionHandler(tmpURL, item, nil);
-    return [NSProgress progressWithTotalUnitCount:0];
+    return progress;
 }
 
 #pragma mark - Enumeration
@@ -130,12 +112,10 @@ static void CompleteMutation(char *json,
 
 #pragma mark - Mutations (user create / update / delete -> Go)
 
-// Read the optional content URL the system hands us into an NSData.
-static NSData *DataFromURL(NSURL *url) {
-    if (url == nil) {
-        return nil;
-    }
-    return [NSData dataWithContentsOfURL:url];
+// The local path of the optional content URL the system hands us ("" for
+// none); the Go side streams from it.
+static const char *PathOf(NSURL *url) {
+    return url ? url.path.fileSystemRepresentation : "";
 }
 
 - (NSProgress *)createItemBasedOnTemplate:(NSFileProviderItem)itemTemplate
@@ -145,16 +125,16 @@ static NSData *DataFromURL(NSURL *url) {
                                   request:(NSFileProviderRequest *)request
                         completionHandler:(void (^)(NSFileProviderItem _Nullable, NSFileProviderItemFields, BOOL, NSError * _Nullable))completionHandler {
     BOOL isFolder = [itemTemplate.contentType conformsToType:UTTypeFolder];
-    NSData *data = isFolder ? nil : DataFromURL(url);
     NSString *parent = GoParent(itemTemplate.parentItemIdentifier);
 
+    NSProgress *progress = [NSProgress progressWithTotalUnitCount:1];
     char *json = ProviderCreate((char *)itemTemplate.filename.UTF8String,
                                 (char *)parent.UTF8String,
                                 isFolder ? 1 : 0,
-                                (void *)data.bytes,
-                                (int)data.length);
+                                (char *)(isFolder ? "" : PathOf(url)));
+    progress.completedUnitCount = 1;
     CompleteMutation(json, completionHandler);
-    return [NSProgress progressWithTotalUnitCount:0];
+    return progress;
 }
 
 - (NSProgress *)modifyItem:(NSFileProviderItem)item
@@ -167,19 +147,19 @@ static NSData *DataFromURL(NSURL *url) {
     BOOL contentChanged = (changedFields & NSFileProviderItemContents) != 0;
     BOOL nameChanged = (changedFields & NSFileProviderItemFilename) != 0;
     BOOL parentChanged = (changedFields & NSFileProviderItemParentItemIdentifier) != 0;
-    NSData *data = contentChanged ? DataFromURL(newContents) : nil;
     NSString *newParent = parentChanged ? GoParent(item.parentItemIdentifier) : @"";
 
+    NSProgress *progress = [NSProgress progressWithTotalUnitCount:1];
     char *json = ProviderUpdate((char *)item.itemIdentifier.UTF8String,
                                 (char *)item.filename.UTF8String,
                                 (char *)newParent.UTF8String,
                                 contentChanged ? 1 : 0,
                                 nameChanged ? 1 : 0,
                                 parentChanged ? 1 : 0,
-                                (void *)data.bytes,
-                                (int)data.length);
+                                (char *)(contentChanged ? PathOf(newContents) : ""));
+    progress.completedUnitCount = 1;
     CompleteMutation(json, completionHandler);
-    return [NSProgress progressWithTotalUnitCount:0];
+    return progress;
 }
 
 - (NSProgress *)deleteItemWithIdentifier:(NSFileProviderItemIdentifier)identifier

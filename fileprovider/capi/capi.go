@@ -21,7 +21,6 @@ import "C"
 
 import (
 	"encoding/json"
-	"io"
 	"unsafe"
 
 	"ella.to/simplefs/fileprovider"
@@ -110,70 +109,46 @@ func ProviderItemJSON(cid *C.char) *C.char {
 	return okItem(it)
 }
 
-// ProviderContent returns the bytes of a file. The length is written to
-// outLen and the fileprovider.Code to outCode (0 == ok). On failure the return is
-// NULL and, when there is a message, *outErr is a C string the caller frees
-// with ProviderFree. The buffer (on success) is freed with ProviderFree.
+// ProviderFetchToPath streams the content of the file with the given ID
+// into the local file at cdst and returns a result envelope with the item
+// as of the copy. Content never passes through C memory, so files of any
+// size work.
 //
-//export ProviderContent
-func ProviderContent(cid *C.char, outLen *C.int, outCode *C.int, outErr **C.char) unsafe.Pointer {
-	*outLen = 0
-	*outErr = nil
-	*outCode = C.int(fileprovider.CodeIO)
-
-	b := fileprovider.Current()
-	if b == nil {
-		*outErr = C.CString("fileprovider: no provider registered")
-		return nil
-	}
-	rc, err := b.Open(C.GoString(cid))
-	if err != nil {
-		setErr(outCode, outErr, err)
-		return nil
-	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		setErr(outCode, outErr, err)
-		return nil
-	}
-	*outCode = C.int(fileprovider.CodeOK)
-	*outLen = C.int(len(data))
-	return C.CBytes(data)
-}
-
-func setErr(outCode *C.int, outErr **C.char, err error) {
-	code, msg := fileprovider.CodeOf(err)
-	*outCode = C.int(code)
-	if msg != "" {
-		*outErr = C.CString(msg)
-	}
-}
-
-// ProviderCreate handles a user-created item and returns the result envelope.
-//
-//export ProviderCreate
-func ProviderCreate(cname, cparent *C.char, cisDir C.int, data unsafe.Pointer, n C.int) *C.char {
+//export ProviderFetchToPath
+func ProviderFetchToPath(cid, cdst *C.char) *C.char {
 	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
 	}
-	var content []byte
-	if cisDir == 0 && data != nil && n > 0 {
-		content = C.GoBytes(data, n)
-	}
-	it, err := b.Create(C.GoString(cname), C.GoString(cparent), cisDir != 0, content)
+	it, err := b.FetchTo(C.GoString(cid), C.GoString(cdst))
 	if err != nil {
 		return fail(err)
 	}
 	return okItem(it)
 }
 
-// ProviderUpdate handles a content edit, rename, and/or move and returns the
-// result envelope.
+// ProviderCreate handles a user-created item and returns the result
+// envelope. For a file, csrc is the local file holding its content (empty
+// for none), streamed into the provider.
+//
+//export ProviderCreate
+func ProviderCreate(cname, cparent *C.char, cisDir C.int, csrc *C.char) *C.char {
+	b := fileprovider.Current()
+	if b == nil {
+		return noProvider()
+	}
+	it, err := b.Create(C.GoString(cname), C.GoString(cparent), cisDir != 0, C.GoString(csrc))
+	if err != nil {
+		return fail(err)
+	}
+	return okItem(it)
+}
+
+// ProviderUpdate handles a content edit (streamed from the local file csrc),
+// rename, and/or move and returns the result envelope.
 //
 //export ProviderUpdate
-func ProviderUpdate(cid, cnewName, cnewParent *C.char, changedContent, changedName, changedParent C.int, data unsafe.Pointer, n C.int) *C.char {
+func ProviderUpdate(cid, cnewName, cnewParent *C.char, changedContent, changedName, changedParent C.int, csrc *C.char) *C.char {
 	b := fileprovider.Current()
 	if b == nil {
 		return noProvider()
@@ -189,9 +164,7 @@ func ProviderUpdate(cid, cnewName, cnewParent *C.char, changedContent, changedNa
 	}
 	if changedContent != 0 {
 		req.ChangedContent = true
-		if data != nil && n > 0 {
-			req.Content = C.GoBytes(data, n)
-		}
+		req.ContentPath = C.GoString(csrc)
 	}
 	it, err := b.Update(req)
 	if err != nil {
