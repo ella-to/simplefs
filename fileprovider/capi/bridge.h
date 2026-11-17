@@ -33,6 +33,7 @@ enum {
     FPCodeServer       = 5,
     FPCodeUnsupported  = 6,
     FPCodeIO           = 7,
+    FPCodeExpired      = 8, // sync anchor too old: re-enumerate
 };
 
 // Metadata / listing. Each returns a JSON result envelope C string the caller
@@ -56,6 +57,15 @@ char *ProviderUpdate(char *id, char *newName, char *newParentID,
                      int changedContent, int changedName, int changedParent,
                      char *srcPath);
 char *ProviderDelete(char *id);
+
+// Change tracking. ProviderTrackChanges starts it; notify is called from a
+// Go thread whenever changes are available (signal the working set from
+// it). ProviderChangesSince returns {ok,updated,deleted,anchor} or a failure
+// envelope (FPCodeExpired: re-enumerate).
+typedef void (*sfs_notify_fn)(void);
+void ProviderTrackChanges(sfs_notify_fn notify);
+unsigned long long ProviderSyncAnchor(void);
+char *ProviderChangesSince(unsigned long long anchor);
 
 void ProviderSetHostDir(char *path);
 void ProviderSetDomain(char *id);

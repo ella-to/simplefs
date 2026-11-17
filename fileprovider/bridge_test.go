@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"ella.to/simplefs"
 	"ella.to/simplefs/memfs"
@@ -339,5 +340,43 @@ func TestBridgeIDsSurviveRestart(t *testing.T) {
 		if fresh.ID == old {
 			t.Fatalf("new item reused id %s", old)
 		}
+	}
+}
+
+func TestBridgeChangeTracking(t *testing.T) {
+	p := memfs.New()
+	b := NewBridge(p)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	notified := make(chan struct{}, 10)
+	go b.TrackChanges(ctx, func() { notified <- struct{}{} })
+	time.Sleep(50 * time.Millisecond) // let the watch start
+
+	start := b.Anchor()
+	ctxp := t.Context()
+	simplefs.WriteFile(ctxp, p, "/outside.txt", []byte("made elsewhere"), 0)
+	select {
+	case <-notified:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no change notification")
+	}
+	updated, deleted, next, err := b.ChangesSince(start)
+	if err != nil || len(updated) != 1 || updated[0].Name != "outside.txt" || len(deleted) != 0 {
+		t.Fatalf("changes = %+v, %v, %v", updated, deleted, err)
+	}
+	id := updated[0].ID
+
+	p.Rename(ctxp, "/outside.txt", "/renamed.txt", simplefs.RenameOptions{})
+	p.Remove(ctxp, "/renamed.txt", simplefs.RemoveOptions{})
+	deadline := time.Now().Add(5 * time.Second)
+	for b.Anchor() < next+2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	updated, deleted, _, err = b.ChangesSince(next)
+	if err != nil || len(deleted) != 1 || deleted[0] != id || len(updated) != 0 {
+		t.Fatalf("after rename+remove: updated %+v deleted %v err %v; want %s deleted", updated, deleted, err, id)
+	}
+	if _, _, _, err := b.ChangesSince(next + 1000); CodeOfMust(err) != CodeExpired {
+		t.Fatalf("future anchor = %v, want CodeExpired", err)
 	}
 }

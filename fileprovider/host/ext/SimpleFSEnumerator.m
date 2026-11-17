@@ -1,5 +1,6 @@
 #import "SimpleFSEnumerator.h"
 #import "SimpleFSItem.h"
+#import "bridge.h"
 
 @interface SimpleFSEnumerator ()
 @property (nonatomic, copy) NSFileProviderItemIdentifier container;
@@ -51,15 +52,46 @@ static NSString *TokenForPage(NSFileProviderPage page) {
     [observer finishEnumeratingUpToPage:[next dataUsingEncoding:NSUTF8StringEncoding]];
 }
 
+static NSFileProviderSyncAnchor AnchorData(unsigned long long n) {
+    return [[NSString stringWithFormat:@"%llu", n] dataUsingEncoding:NSUTF8StringEncoding];
+}
+
 - (void)enumerateChangesForObserver:(id<NSFileProviderChangeObserver>)observer
                      fromSyncAnchor:(NSFileProviderSyncAnchor)syncAnchor {
-    // Change tracking is not implemented; the system re-enumerates on demand.
-    [observer finishEnumeratingChangesUpToSyncAnchor:syncAnchor moreComing:NO];
+    // Changes are tracked globally and reported through the working set,
+    // the enumerator the system uses to keep its whole replica current.
+    // Other containers have nothing extra to report.
+    if (![self.container isEqualToString:NSFileProviderWorkingSetContainerItemIdentifier]) {
+        [observer finishEnumeratingChangesUpToSyncAnchor:AnchorData(ProviderSyncAnchor()) moreComing:NO];
+        return;
+    }
+    NSString *s = [[NSString alloc] initWithData:syncAnchor encoding:NSUTF8StringEncoding];
+    unsigned long long from = strtoull(s.UTF8String ?: "0", NULL, 10);
+    NSDictionary *res = [SimpleFSItem resultFromGoJSON:ProviderChangesSince(from)];
+    if (![res[@"ok"] boolValue]) {
+        NSError *err = [res[@"code"] intValue] == FPCodeExpired
+            ? [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorSyncAnchorExpired userInfo:nil]
+            : [SimpleFSItem errorForCode:[res[@"code"] intValue] message:res[@"msg"]];
+        [observer finishEnumeratingWithError:err];
+        return;
+    }
+    NSMutableArray *updated = [NSMutableArray array];
+    for (NSDictionary *d in res[@"updated"]) {
+        [updated addObject:[SimpleFSItem itemFromDictionary:d]];
+    }
+    if (updated.count) {
+        [observer didUpdateItems:updated];
+    }
+    NSArray *deleted = res[@"deleted"];
+    if (deleted.count) {
+        [observer didDeleteItemsWithIdentifiers:deleted];
+    }
+    [observer finishEnumeratingChangesUpToSyncAnchor:AnchorData([res[@"anchor"] unsignedLongLongValue])
+                                          moreComing:NO];
 }
 
 - (void)currentSyncAnchorWithCompletionHandler:(void (^)(NSFileProviderSyncAnchor _Nullable))completionHandler {
-    NSData *anchor = [@"anchor-1" dataUsingEncoding:NSUTF8StringEncoding];
-    completionHandler(anchor);
+    completionHandler(AnchorData(ProviderSyncAnchor()));
 }
 
 @end

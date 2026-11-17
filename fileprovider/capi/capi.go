@@ -16,10 +16,15 @@ package capi
 
 /*
 #include <stdlib.h>
+
+typedef void (*sfs_notify_fn)(void);
+
+static void sfs_call_notify(sfs_notify_fn fn) { if (fn) fn(); }
 */
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -218,6 +223,62 @@ func safeName(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// ProviderSyncAnchor returns the current change-tracking anchor.
+//
+//export ProviderSyncAnchor
+func ProviderSyncAnchor() C.ulonglong {
+	b := fileprovider.Current()
+	if b == nil {
+		return 0
+	}
+	return C.ulonglong(b.Anchor())
+}
+
+// changesDTO is the envelope ProviderChangesSince returns.
+type changesDTO struct {
+	OK      bool                `json:"ok"`
+	Updated []fileprovider.Item `json:"updated,omitempty"`
+	Deleted []string            `json:"deleted,omitempty"`
+	Anchor  uint64              `json:"anchor"`
+	Code    int                 `json:"code,omitempty"`
+	Msg     string              `json:"msg,omitempty"`
+}
+
+// ProviderChangesSince returns the items changed after anchor as
+// {"ok":true,"updated":[…],"deleted":[ids],"anchor":N}, or a failure
+// envelope; code FPCodeExpired means the system must re-enumerate.
+//
+//export ProviderChangesSince
+func ProviderChangesSince(anchor C.ulonglong) *C.char {
+	b := fileprovider.Current()
+	if b == nil {
+		return noProvider()
+	}
+	updated, deleted, next, err := b.ChangesSince(uint64(anchor))
+	var out changesDTO
+	if err != nil {
+		code, msg := fileprovider.CodeOf(err)
+		out = changesDTO{Code: int(code), Msg: msg}
+	} else {
+		out = changesDTO{OK: true, Updated: updated, Deleted: deleted, Anchor: next}
+	}
+	data, _ := json.Marshal(out)
+	return C.CString(string(data))
+}
+
+// ProviderTrackChanges starts change tracking; fn is called (on a Go
+// thread, debounced) whenever the system should ask for changes — the host
+// signals the working-set enumerator from it. Call once per process.
+//
+//export ProviderTrackChanges
+func ProviderTrackChanges(fn C.sfs_notify_fn) {
+	b := fileprovider.Current()
+	if b == nil {
+		return
+	}
+	go b.TrackChanges(context.Background(), func() { C.sfs_call_notify(fn) })
 }
 
 // ProviderFree releases a buffer returned by this package.

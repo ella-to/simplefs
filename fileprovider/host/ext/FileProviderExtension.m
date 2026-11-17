@@ -7,6 +7,17 @@
 @property (nonatomic, strong) NSFileProviderDomain *domain;
 @end
 
+// The domain this extension process serves, for the change callback.
+static NSFileProviderDomain *gDomain;
+
+// Called by Go (debounced) when the backend changed: ask the system to
+// fetch changes for the working set, which drives Finder's view.
+static void ChangesAvailable(void) {
+    NSFileProviderManager *mgr = [NSFileProviderManager managerForDomain:gDomain];
+    [mgr signalEnumeratorForContainerItemIdentifier:NSFileProviderWorkingSetContainerItemIdentifier
+                                  completionHandler:^(NSError *error) {}];
+}
+
 @implementation FileProviderExtension
 
 - (instancetype)initWithDomain:(NSFileProviderDomain *)domain {
@@ -24,6 +35,14 @@
         // one extension instance per domain, so this scopes per-mount side
         // effects.
         ProviderSetDomain((char *)domain.identifier.UTF8String);
+
+        // Report backend changes the system did not make (WatchProvider
+        // events, or periodic re-enumeration without one).
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            gDomain = domain;
+            ProviderTrackChanges(ChangesAvailable);
+        });
     }
     return self;
 }

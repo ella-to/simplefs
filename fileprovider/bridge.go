@@ -35,6 +35,7 @@ type Bridge struct {
 	ids     *idtable.Table[string]
 	seq     atomic.Uint64           // last "sfs-N" handed out
 	journal atomic.Pointer[journal] // set by Persist
+	changes changeLog
 }
 
 // idPrefix starts every item ID the bridge hands out.

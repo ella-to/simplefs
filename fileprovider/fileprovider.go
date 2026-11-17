@@ -76,6 +76,7 @@ const (
 	CodeServer                   // a transient backend failure (system retries)
 	CodeUnsupported              // the provider does not support the operation
 	CodeIO                       // an unclassified failure
+	// CodeExpired (changes.go) follows.
 )
 
 // Error carries a Code and a human-readable message across the extension
