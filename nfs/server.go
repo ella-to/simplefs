@@ -25,6 +25,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,13 @@ type Options struct {
 	// stopping, bind failures, and provider errors that reach clients as a
 	// generic I/O error. Nil discards them.
 	Logger *slog.Logger
+
+	// AllowedClients lists the networks clients may connect from. Empty
+	// means loopback only (127.0.0.0/8 and ::1), the safe default for a
+	// server with no authentication; pass 0.0.0.0/0 and ::/0 to allow
+	// everyone (e.g. inside a Docker network). Connections and datagrams
+	// from other addresses are dropped.
+	AllowedClients []netip.Prefix
 
 	// ReadOnly rejects every mutating procedure with NFS3ERR_ROFS before
 	// it reaches the provider, and makes ACCESS deny write rights.
@@ -309,6 +317,33 @@ func (s *Server) untrackConn(c net.Conn) {
 	s.wg.Done()
 }
 
+// allowed reports whether a client at addr may talk to the server.
+func (s *Server) allowed(addr net.Addr) bool {
+	var ip netip.Addr
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		ip, _ = netip.AddrFromSlice(a.IP)
+	case *net.UDPAddr:
+		ip, _ = netip.AddrFromSlice(a.IP)
+	default:
+		ap, err := netip.ParseAddrPort(addr.String())
+		if err != nil {
+			return false
+		}
+		ip = ap.Addr()
+	}
+	ip = ip.Unmap()
+	if len(s.opts.AllowedClients) == 0 {
+		return ip.IsLoopback()
+	}
+	for _, p := range s.opts.AllowedClients {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -324,6 +359,11 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 				return ErrServerClosed
 			}
 			return err
+		}
+		if !s.allowed(conn.RemoteAddr()) {
+			s.log.Warn("nfs: rejected connection", "remote", conn.RemoteAddr().String())
+			conn.Close()
+			continue
 		}
 		if !s.trackConn(conn) {
 			conn.Close()

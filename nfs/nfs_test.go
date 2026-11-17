@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"runtime"
 	"strconv"
 	"testing"
@@ -772,5 +773,37 @@ func TestSetattrChown(t *testing.T) {
 	c.nfsCall(nfsProcSetattr, args, nfsOK)
 	if rec.uid != -1 || rec.gid != 1234 {
 		t.Fatalf("Chown(%d, %d), want (-1, 1234)", rec.uid, rec.gid)
+	}
+}
+
+func TestAllowedClients(t *testing.T) {
+	srv := NewServer(memfs.New(), Options{})
+	cases := []struct {
+		allow []netip.Prefix
+		addr  string
+		want  bool
+	}{
+		{nil, "127.0.0.1:900", true},
+		{nil, "[::1]:900", true},
+		{nil, "[::ffff:127.0.0.1]:900", true},
+		{nil, "10.0.0.2:900", false},
+		{[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, "10.1.2.3:900", true},
+		{[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, "127.0.0.1:900", false},
+		{[]netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}, "192.168.1.1:900", true},
+	}
+	for _, c := range cases {
+		srv.opts.AllowedClients = c.allow
+		addr, _ := net.ResolveTCPAddr("tcp", c.addr)
+		if got := srv.allowed(addr); got != c.want {
+			t.Errorf("allow=%v addr=%s: got %v", c.allow, c.addr, got)
+		}
+	}
+	srv.Close()
+
+	// A rejected connection is closed right away.
+	_, c := startServerWith(t, memfs.New(), Options{AllowedClients: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}})
+	c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection from a disallowed client stayed open")
 	}
 }

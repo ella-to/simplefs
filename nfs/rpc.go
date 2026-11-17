@@ -220,6 +220,9 @@ func (s *Server) servePacket(pc net.PacketConn) error {
 			}
 			return err
 		}
+		if !s.allowed(addr) {
+			continue
+		}
 		msg := make([]byte, n)
 		copy(msg, buf[:n])
 		reqs.Add(1)
