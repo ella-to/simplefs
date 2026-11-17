@@ -155,6 +155,31 @@ import (
 	"unsafe"
 )
 
+// await runs a blocking NSFileProviderManager call on its own goroutine so
+// ctx can abandon it: the system offers no way to cancel these calls, so
+// after cancellation the call still completes in the background and its
+// result is discarded. fn must own (and free) everything it passes to C.
+func await[T any](ctx context.Context, fn func() T) (T, error) {
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
+	ch := make(chan T, 1)
+	go func() { ch <- fn() }()
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
+}
+
+type pathResult struct {
+	path string
+	err  error
+}
+
 // AddDomain adds a File Provider domain with the given identifier and
 // display name — the name shown in Finder's sidebar — and returns its
 // user-visible root path, which lives under ~/Library/CloudStorage. macOS,
@@ -164,84 +189,100 @@ import (
 // current path. Newly added third-party domains start DISABLED on macOS
 // 15.2+; AddDomain still succeeds, but the folder is unusable until the user
 // enables it once under System Settings > General > Login Items & Extensions
-// > File Providers.
+// > File Providers. ctx bounds the wait (see await).
 func AddDomain(ctx context.Context, domainID, displayName string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
 	if displayName == "" {
 		displayName = domainID
 	}
-	cid := C.CString(domainID)
-	defer C.free(unsafe.Pointer(cid))
-	cname := C.CString(displayName)
-	defer C.free(unsafe.Pointer(cname))
-
-	var outPath, outErr *C.char
-	code := C.sfs_mount(cid, cname, &outPath, &outErr)
-	if outPath != nil {
-		path := C.GoString(outPath)
-		C.free(unsafe.Pointer(outPath))
-		return path, nil
+	r, err := await(ctx, func() pathResult {
+		cid := C.CString(domainID)
+		defer C.free(unsafe.Pointer(cid))
+		cname := C.CString(displayName)
+		defer C.free(unsafe.Pointer(cname))
+		var outPath, outErr *C.char
+		code := C.sfs_mount(cid, cname, &outPath, &outErr)
+		if outPath != nil {
+			path := C.GoString(outPath)
+			C.free(unsafe.Pointer(outPath))
+			return pathResult{path: path}
+		}
+		return pathResult{err: domainErr("add domain "+domainID, code, outErr)}
+	})
+	if err != nil {
+		return "", err
 	}
-	return "", domainErr("add domain "+domainID, code, outErr)
+	return r.path, r.err
+}
+
+type domainsResult struct {
+	domains []Domain
+	err     error
 }
 
 // Domains returns every domain owned by this app's extension. Use it to
 // rediscover domains that outlived the process (e.g. after a restart) so
 // they can be managed or removed again.
 func Domains(ctx context.Context) ([]Domain, error) {
-	if err := ctx.Err(); err != nil {
+	r, err := await(ctx, func() domainsResult {
+		var outJSON, outErr *C.char
+		if code := C.sfs_list(&outJSON, &outErr); code != 0 {
+			return domainsResult{err: domainErr("list domains", code, outErr)}
+		}
+		var raw []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if outJSON != nil {
+			s := C.GoString(outJSON)
+			C.free(unsafe.Pointer(outJSON))
+			if err := json.Unmarshal([]byte(s), &raw); err != nil {
+				return domainsResult{err: fmt.Errorf("fileprovider: parse domains: %w", err)}
+			}
+		}
+		out := make([]Domain, 0, len(raw))
+		for _, d := range raw {
+			out = append(out, Domain{ID: d.ID, DisplayName: d.Name})
+		}
+		return domainsResult{domains: out}
+	})
+	if err != nil {
 		return nil, err
 	}
-	var outJSON, outErr *C.char
-	if code := C.sfs_list(&outJSON, &outErr); code != 0 {
-		return nil, domainErr("list domains", code, outErr)
-	}
-	var raw []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	if outJSON != nil {
-		s := C.GoString(outJSON)
-		C.free(unsafe.Pointer(outJSON))
-		if err := json.Unmarshal([]byte(s), &raw); err != nil {
-			return nil, fmt.Errorf("fileprovider: parse domains: %w", err)
-		}
-	}
-	out := make([]Domain, 0, len(raw))
-	for _, r := range raw {
-		out = append(out, Domain{ID: r.ID, DisplayName: r.Name})
-	}
-	return out, nil
+	return r.domains, r.err
 }
 
 // RemoveAllDomains removes every domain owned by this app's extension,
 // including orphans left behind by previous runs.
 func RemoveAllDomains(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
+	r, err := await(ctx, func() error {
+		var outErr *C.char
+		if code := C.sfs_unmount_all(&outErr); code != 0 {
+			return domainErr("remove all domains", code, outErr)
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	var outErr *C.char
-	if code := C.sfs_unmount_all(&outErr); code != 0 {
-		return domainErr("remove all domains", code, outErr)
-	}
-	return nil
+	return r
 }
 
 // RemoveDomain removes the domain with the given identifier. Removing a
 // domain that does not exist is a no-op and returns nil.
 func RemoveDomain(ctx context.Context, domainID string) error {
-	if err := ctx.Err(); err != nil {
+	r, err := await(ctx, func() error {
+		cid := C.CString(domainID)
+		defer C.free(unsafe.Pointer(cid))
+		var outErr *C.char
+		if code := C.sfs_unmount(cid, &outErr); code != 0 {
+			return domainErr("remove domain "+domainID, code, outErr)
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	cid := C.CString(domainID)
-	defer C.free(unsafe.Pointer(cid))
-	var outErr *C.char
-	if code := C.sfs_unmount(cid, &outErr); code != 0 {
-		return domainErr("remove domain "+domainID, code, outErr)
-	}
-	return nil
+	return r
 }
 
 // domainErr builds the error for a failed NSFileProviderManager call,
