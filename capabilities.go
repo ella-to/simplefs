@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-////////////////////////////////////////////////////////////////////////////////
 // Optional Capabilities
 //
 // A provider advertises a capability by implementing the interface; mounts
@@ -15,7 +14,6 @@ import (
 //
 // A capability that is implemented but cannot serve a particular call should
 // return ErrNotSupported.
-////////////////////////////////////////////////////////////////////////////////
 
 // SymlinkProvider supports symbolic links.
 type SymlinkProvider interface {
@@ -71,10 +69,6 @@ type WatchProvider interface {
 	Watch(ctx context.Context, path string, recursive bool) (<-chan Event, error)
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Filesystem Information
-////////////////////////////////////////////////////////////////////////////////
-
 // FSInfo describes overall filesystem capacity.
 type FSInfo struct {
 	BlockSize uint64
@@ -85,10 +79,6 @@ type FSInfo struct {
 	MaxNameLength uint32
 	ReadOnly      bool
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Events
-////////////////////////////////////////////////////////////////////////////////
 
 // EventType identifies a filesystem event.
 type EventType uint32

@@ -182,10 +182,6 @@ func (m *MemFS) event(typ simplefs.EventType, path, oldPath string, n *node) {
 	m.notify(simplefs.Event{Type: typ, Path: path, OldPath: oldPath, Info: info})
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Core FileProvider
-////////////////////////////////////////////////////////////////////////////////
-
 // Stat returns metadata for the object at path (without following symlinks).
 func (m *MemFS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error) {
 	p := simplefs.CleanPath(path)
@@ -462,10 +458,6 @@ func (m *MemFS) Rename(ctx context.Context, oldPath, newPath string, opts simple
 	return nil
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Capabilities
-////////////////////////////////////////////////////////////////////////////////
-
 // Readlink returns the target of the symlink at path.
 func (m *MemFS) Readlink(ctx context.Context, path string) (string, error) {
 	p := simplefs.CleanPath(path)
@@ -684,10 +676,6 @@ func (m *MemFS) Watch(ctx context.Context, path string, recursive bool) (<-chan 
 	}()
 	return w.ch, nil
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// FileHandle
-////////////////////////////////////////////////////////////////////////////////
 
 type handle struct {
 	m    *MemFS
