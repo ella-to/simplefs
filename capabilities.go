@@ -31,7 +31,8 @@ type ChmodProvider interface {
 	Chmod(ctx context.Context, path string, mode FileMode) error
 }
 
-// ChownProvider supports changing ownership.
+// ChownProvider supports changing ownership. As with os.Chown, an id of -1
+// leaves that id unchanged.
 //
 // On Windows this may simply return ErrNotSupported.
 type ChownProvider interface {

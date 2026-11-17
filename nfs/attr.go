@@ -240,9 +240,10 @@ func readSattr3(r *xdrReader) sattr3 {
 	return a
 }
 
-// apply carries out the attribute changes a client requested. Ownership
-// changes are quietly ignored (single-user server); mode and times are
-// forwarded when the provider implements the matching capability.
+// applySattr carries out the attribute changes a client requested: size,
+// and — when the provider implements the matching capability — mode,
+// ownership, and times. Attributes reported back still use Options.UID/GID
+// (the provider model has no owner field).
 func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 	if a.setSize {
 		h, release, err := s.files.acquire(s.ctx, id, path, true)
@@ -258,6 +259,20 @@ func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 	if a.setMode {
 		if cp, ok := simplefs.As[simplefs.ChmodProvider](s.p); ok {
 			if err := cp.Chmod(s.ctx, path, simplefs.FileMode(a.mode)); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
+				return err
+			}
+		}
+	}
+	if a.setUID || a.setGID {
+		if cp, ok := simplefs.As[simplefs.ChownProvider](s.p); ok {
+			uid, gid := -1, -1 // -1 leaves that id unchanged, as with os.Chown
+			if a.setUID {
+				uid = int(a.uid)
+			}
+			if a.setGID {
+				gid = int(a.gid)
+			}
+			if err := cp.Chown(s.ctx, path, uid, gid); err != nil && !errors.Is(err, simplefs.ErrNotSupported) {
 				return err
 			}
 		}

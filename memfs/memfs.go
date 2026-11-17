@@ -634,12 +634,20 @@ func (m *FS) Chmod(ctx context.Context, path string, mode simplefs.FileMode) err
 	return m.setMeta("chmod", path, func(n *node) { n.mode = mode })
 }
 
-// Chown changes the ownership of the object at path.
+// Chown changes the ownership of the object at path; -1 leaves an id
+// unchanged.
 func (m *FS) Chown(ctx context.Context, path string, uid, gid int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return m.setMeta("chown", path, func(n *node) { n.uid, n.gid = uid, gid })
+	return m.setMeta("chown", path, func(n *node) {
+		if uid >= 0 {
+			n.uid = uid
+		}
+		if gid >= 0 {
+			n.gid = gid
+		}
+	})
 }
 
 // Chtimes changes the modification time of the object at path (atime is

@@ -744,3 +744,33 @@ func TestShutdownWaitsAndSyncs(t *testing.T) {
 		t.Fatal("still accepting after Shutdown")
 	}
 }
+
+type chownRecorder struct {
+	*memfs.FS
+	uid, gid int
+}
+
+func (r *chownRecorder) Chown(ctx context.Context, path string, uid, gid int) error {
+	r.uid, r.gid = uid, gid
+	return nil
+}
+
+func TestSetattrChown(t *testing.T) {
+	rec := &chownRecorder{FS: memfs.New()}
+	_, c := startServerWith(t, rec, Options{})
+	fh := c.create(c.mnt(), "f")
+	args := newWriter()
+	args.opaque(fh)
+	args.bool(false)  // mode
+	args.bool(false)  // uid unset
+	args.bool(true)   // gid
+	args.uint32(1234) //
+	args.bool(false)  // size
+	args.uint32(0)
+	args.uint32(0)
+	args.bool(false)
+	c.nfsCall(nfsProcSetattr, args, nfsOK)
+	if rec.uid != -1 || rec.gid != 1234 {
+		t.Fatalf("Chown(%d, %d), want (-1, 1234)", rec.uid, rec.gid)
+	}
+}
