@@ -88,16 +88,26 @@ func writeTime(w *xdrWriter, t time.Time) {
 	w.uint32(uint32(t.Nanosecond()))
 }
 
-// writeFattr3 encodes the full fattr3 for info, using id as fileid3.
-func (s *Server) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
+// effectiveMode is the permission bits reported for info: the provider's,
+// or a conventional default when the provider leaves them zero.
+func effectiveMode(info simplefs.FileInfo) uint32 {
 	mode := uint32(info.Mode) & 0o7777
 	if mode == 0 {
-		if info.Type.IsDir() {
+		switch {
+		case info.Type.IsDir():
 			mode = 0o755
-		} else {
+		case info.Type.IsSymlink():
+			mode = 0o777
+		default:
 			mode = 0o644
 		}
 	}
+	return mode
+}
+
+// writeFattr3 encodes the full fattr3 for info, using id as fileid3.
+func (s *Server) writeFattr3(w *xdrWriter, info simplefs.FileInfo, id uint64) {
+	mode := effectiveMode(info)
 	nlink := uint32(1)
 	if info.Type.IsDir() {
 		nlink = 2

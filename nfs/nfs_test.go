@@ -680,3 +680,21 @@ func TestCreateVerfBounded(t *testing.T) {
 		t.Fatal("verifier did not follow rename")
 	}
 }
+
+func TestAccessHonoursMode(t *testing.T) {
+	p := memfs.New()
+	_, c := startServerWith(t, p, Options{})
+	root := c.mnt()
+	fh := c.create(root, "ro.txt")
+	if err := p.Chmod(t.Context(), "/ro.txt", 0o444); err != nil {
+		t.Fatal(err)
+	}
+	args := newWriter()
+	args.opaque(fh)
+	args.uint32(accessRead | accessModify | accessExtend | accessExecute)
+	r := c.nfsCall(nfsProcAccess, args, nfsOK)
+	skipPostOpAttr(r)
+	if got := r.uint32(); got != accessRead {
+		t.Fatalf("ACCESS = %#x, want READ only", got)
+	}
+}

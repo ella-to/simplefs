@@ -192,6 +192,16 @@ func (s *Server) opLookup(r *xdrReader, w *xdrWriter) {
 	s.postOpAttr(w, dir, dirID)
 }
 
+// ACCESS3 bits.
+const (
+	accessRead    = 0x01
+	accessLookup  = 0x02
+	accessModify  = 0x04
+	accessExtend  = 0x08
+	accessDelete  = 0x10
+	accessExecute = 0x20
+)
+
 func (s *Server) opAccess(r *xdrReader, w *xdrWriter) {
 	path, id, stat := s.fhPath(r)
 	req := r.uint32()
@@ -200,11 +210,43 @@ func (s *Server) opAccess(r *xdrReader, w *xdrWriter) {
 		postOpNone(w)
 		return
 	}
-	// The provider model has no per-user permissions; grant whatever was
-	// asked. Individual operations can still fail with ErrPermission.
+	info, err := s.p.Stat(s.ctx, path)
+	if err != nil {
+		w.uint32(errStatus(err))
+		postOpNone(w)
+		return
+	}
 	w.uint32(nfsOK)
-	s.postOpAttr(w, path, id)
-	w.uint32(req)
+	s.postOpAttrInfo(w, info, id)
+	w.uint32(req & s.accessMask(info))
+}
+
+// accessMask derives the ACCESS3 rights from the owner permission bits (the
+// server reports a single owner for every file, see Options.UID) and the
+// read-only state. Individual operations can still fail with ErrPermission.
+func (s *Server) accessMask(info simplefs.FileInfo) uint32 {
+	mode := effectiveMode(info)
+	var m uint32
+	if mode&0o400 != 0 {
+		m |= accessRead
+	}
+	if mode&0o200 != 0 {
+		m |= accessModify | accessExtend | accessDelete
+	}
+	if mode&0o100 != 0 {
+		if info.IsDir() {
+			m |= accessLookup
+		} else {
+			m |= accessExecute
+		}
+	}
+	if info.Type.IsSymlink() {
+		m |= accessRead | accessLookup
+	}
+	if s.readOnly() {
+		m &^= accessModify | accessExtend | accessDelete
+	}
+	return m
 }
 
 func (s *Server) opReadlink(r *xdrReader, w *xdrWriter) {
@@ -688,18 +730,17 @@ func (s *Server) opFsstat(r *xdrReader, w *xdrWriter) {
 		return
 	}
 	// Generous defaults for providers without StatFS: a big, mostly-free disk.
-	var total, free uint64 = 1 << 42, 1 << 42
-	if sp, ok := s.p.(simplefs.StatFSProvider); ok {
-		if fsinfo, err := sp.StatFS(s.ctx); err == nil && fsinfo.BlockSize > 0 {
-			total = fsinfo.Blocks * fsinfo.BlockSize
-			free = fsinfo.Available * fsinfo.BlockSize
-		}
+	var total, free, avail uint64 = 1 << 42, 1 << 42, 1 << 42
+	if fsinfo, ok := s.statFS(); ok && fsinfo.BlockSize > 0 {
+		total = fsinfo.Blocks * fsinfo.BlockSize
+		free = fsinfo.Free * fsinfo.BlockSize
+		avail = fsinfo.Available * fsinfo.BlockSize
 	}
 	w.uint32(nfsOK)
 	s.postOpAttr(w, path, id)
 	w.uint64(total)   // tbytes
 	w.uint64(free)    // fbytes
-	w.uint64(free)    // abytes
+	w.uint64(avail)   // abytes
 	w.uint64(1 << 20) // tfiles
 	w.uint64(1 << 20) // ffiles
 	w.uint64(1 << 20) // afiles
@@ -753,14 +794,18 @@ func (s *Server) opPathconf(r *xdrReader, w *xdrWriter) {
 		postOpNone(w)
 		return
 	}
+	nameMax := uint32(255)
+	if fsinfo, ok := s.statFS(); ok && fsinfo.MaxNameLength > 0 {
+		nameMax = fsinfo.MaxNameLength
+	}
 	w.uint32(nfsOK)
 	s.postOpAttr(w, path, id)
-	w.uint32(32767) // linkmax
-	w.uint32(255)   // name_max
-	w.bool(true)    // no_trunc
-	w.bool(false)   // chown_restricted
-	w.bool(false)   // case_insensitive
-	w.bool(true)    // case_preserving
+	w.uint32(32767)   // linkmax
+	w.uint32(nameMax) // name_max
+	w.bool(true)      // no_trunc
+	w.bool(false)     // chown_restricted
+	w.bool(false)     // case_insensitive
+	w.bool(true)      // case_preserving
 }
 
 func (s *Server) opCommit(r *xdrReader, w *xdrWriter) {

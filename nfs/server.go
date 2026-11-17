@@ -26,6 +26,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"ella.to/simplefs"
 )
@@ -63,6 +64,10 @@ type Server struct {
 	fh    *fhTable
 	files *openCache
 
+	// fsReadOnly caches FSInfo.ReadOnly from the most recent StatFS call
+	// (clients issue FSSTAT/FSINFO at mount time and periodically).
+	fsReadOnly atomic.Bool
+
 	writeVerf [8]byte
 
 	verfMu     sync.Mutex
@@ -98,6 +103,24 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 	rand.Read(s.writeVerf[:])
 	return s
 }
+
+// statFS queries the provider's StatFSProvider capability, if any, and
+// refreshes the cached read-only state.
+func (s *Server) statFS() (simplefs.FSInfo, bool) {
+	sp, ok := s.p.(simplefs.StatFSProvider)
+	if !ok {
+		return simplefs.FSInfo{}, false
+	}
+	info, err := sp.StatFS(s.ctx)
+	if err != nil {
+		return simplefs.FSInfo{}, false
+	}
+	s.fsReadOnly.Store(info.ReadOnly)
+	return info, true
+}
+
+// readOnly reports whether the export must be treated as read-only.
+func (s *Server) readOnly() bool { return s.fsReadOnly.Load() }
 
 // Provider returns the wrapped simplefs.FileProvider.
 func (s *Server) Provider() simplefs.FileProvider { return s.p }
