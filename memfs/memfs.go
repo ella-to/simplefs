@@ -285,6 +285,9 @@ func (m *FS) event(typ simplefs.EventType, path, oldPath string, n *node) {
 
 // Stat returns metadata for the object at path (without following symlinks).
 func (m *FS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return simplefs.FileInfo{}, err
+	}
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -300,6 +303,9 @@ func (m *FS) Stat(ctx context.Context, path string) (simplefs.FileInfo, error) {
 // created with opts.Mode (0o644 when zero); with opts.Exclusive set as well
 // an existing file is an error.
 func (m *FS) Open(ctx context.Context, path string, opts simplefs.OpenOptions) (simplefs.FileHandle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p := simplefs.CleanPath(path)
 	if !opts.Read && !opts.Write {
 		opts.Read = true
@@ -363,6 +369,9 @@ func (m *FS) createFileLocked(p string, mode simplefs.FileMode) (*node, error) {
 // ReadDir lists the directory at path. Pagination: entries are sorted by
 // name, Page.Token is the last name of the previous page.
 func (m *FS) ReadDir(ctx context.Context, path string, page simplefs.Page) (simplefs.DirPage, error) {
+	if err := ctx.Err(); err != nil {
+		return simplefs.DirPage{}, err
+	}
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -402,6 +411,9 @@ func (m *FS) ReadDir(ctx context.Context, path string, page simplefs.Page) (simp
 
 // Mkdir creates a directory at path. The parent must already exist.
 func (m *FS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	mode := opts.Mode
 	if mode == 0 {
 		mode = 0o755
@@ -436,6 +448,9 @@ func (m *FS) Mkdir(ctx context.Context, path string, opts simplefs.MkdirOptions)
 // Remove deletes the object at path. Non-empty directories require
 // opts.Recursive; opts.Force turns a missing path into a no-op.
 func (m *FS) Remove(ctx context.Context, path string, opts simplefs.RemoveOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p := simplefs.CleanPath(path)
 	if p == "/" {
 		return patherr("remove", p, simplefs.ErrInvalid)
@@ -472,6 +487,9 @@ func (m *FS) Remove(ctx context.Context, path string, opts simplefs.RemoveOption
 // Rename moves oldPath to newPath. An existing destination requires
 // opts.Overwrite and must be type-compatible (and, for directories, empty).
 func (m *FS) Rename(ctx context.Context, oldPath, newPath string, opts simplefs.RenameOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	op, np := simplefs.CleanPath(oldPath), simplefs.CleanPath(newPath)
 	if op == "/" || np == "/" {
 		return patherr("rename", op, simplefs.ErrInvalid)
@@ -535,6 +553,9 @@ func (m *FS) Rename(ctx context.Context, oldPath, newPath string, opts simplefs.
 
 // Readlink returns the target of the symlink at path.
 func (m *FS) Readlink(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -551,6 +572,9 @@ func (m *FS) Readlink(ctx context.Context, path string) (string, error) {
 
 // Symlink creates a symbolic link at linkPath pointing to target.
 func (m *FS) Symlink(ctx context.Context, target, linkPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p := simplefs.CleanPath(linkPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -573,6 +597,9 @@ func (m *FS) Symlink(ctx context.Context, target, linkPath string) error {
 // Link creates a hard link: newPath becomes another name for the file at
 // existingPath (the two share content, mode, and times).
 func (m *FS) Link(ctx context.Context, existingPath, newPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ep, np := simplefs.CleanPath(existingPath), simplefs.CleanPath(newPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -601,11 +628,17 @@ func (m *FS) Link(ctx context.Context, existingPath, newPath string) error {
 
 // Chmod changes the permission bits of the object at path.
 func (m *FS) Chmod(ctx context.Context, path string, mode simplefs.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.setMeta("chmod", path, func(n *node) { n.mode = mode })
 }
 
 // Chown changes the ownership of the object at path.
 func (m *FS) Chown(ctx context.Context, path string, uid, gid int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.setMeta("chown", path, func(n *node) { n.uid, n.gid = uid, gid })
 }
 
@@ -613,6 +646,9 @@ func (m *FS) Chown(ctx context.Context, path string, uid, gid int) error {
 // accepted for interface compatibility but not stored). A zero mtime leaves
 // the modification time unchanged.
 func (m *FS) Chtimes(ctx context.Context, path string, atime, mtime time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.setMeta("chtimes", path, func(n *node) {
 		if !mtime.IsZero() {
 			n.modTime = mtime
@@ -637,6 +673,9 @@ func (m *FS) setMeta(op, path string, apply func(*node)) error {
 
 // GetXattr returns the value of the named extended attribute.
 func (m *FS) GetXattr(ctx context.Context, path, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -654,6 +693,9 @@ func (m *FS) GetXattr(ctx context.Context, path, name string) ([]byte, error) {
 
 // SetXattr sets the named extended attribute.
 func (m *FS) SetXattr(ctx context.Context, path, name string, value []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.setMeta("setxattr", path, func(n *node) {
 		if n.xattr == nil {
 			n.xattr = map[string][]byte{}
@@ -664,6 +706,9 @@ func (m *FS) SetXattr(ctx context.Context, path, name string, value []byte) erro
 
 // ListXattr returns the names of all extended attributes, sorted.
 func (m *FS) ListXattr(ctx context.Context, path string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p := simplefs.CleanPath(path)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -677,6 +722,9 @@ func (m *FS) ListXattr(ctx context.Context, path string) ([]string, error) {
 
 // RemoveXattr removes the named extended attribute.
 func (m *FS) RemoveXattr(ctx context.Context, path, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p := simplefs.CleanPath(path)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -697,6 +745,9 @@ func (m *FS) RemoveXattr(ctx context.Context, path, name string) error {
 // StatFS reports the configured capacity (see WithCapacity), with usage
 // derived from the bytes currently stored.
 func (m *FS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return simplefs.FSInfo{}, err
+	}
 	m.mu.RLock()
 	usedBytes := uint64(m.usedBytes)
 	m.mu.RUnlock()
@@ -723,6 +774,9 @@ func (m *FS) StatFS(ctx context.Context) (simplefs.FSInfo, error) {
 // closed when ctx is cancelled; always cancel the context to release the
 // watcher. Slow receivers drop events instead of blocking the filesystem.
 func (m *FS) Watch(ctx context.Context, path string, recursive bool) (<-chan simplefs.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p := simplefs.CleanPath(path)
 
 	m.mu.Lock()
