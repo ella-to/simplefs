@@ -147,6 +147,16 @@ static const char *PathOf(NSURL *url) {
     NSString *parent = GoParent(itemTemplate.parentItemIdentifier);
 
     NSProgress *progress = [NSProgress progressWithTotalUnitCount:1];
+    if ([itemTemplate.contentType conformsToType:UTTypeSymbolicLink] &&
+        [itemTemplate respondsToSelector:@selector(symlinkTargetPath)] &&
+        itemTemplate.symlinkTargetPath) {
+        char *json = ProviderCreateSymlink((char *)itemTemplate.filename.UTF8String,
+                                           (char *)parent.UTF8String,
+                                           (char *)itemTemplate.symlinkTargetPath.UTF8String);
+        progress.completedUnitCount = 1;
+        CompleteMutation(json, completionHandler);
+        return progress;
+    }
     char *json = ProviderCreate((char *)itemTemplate.filename.UTF8String,
                                 (char *)parent.UTF8String,
                                 isFolder ? 1 : 0,

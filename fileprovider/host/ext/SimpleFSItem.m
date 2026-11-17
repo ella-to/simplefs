@@ -10,6 +10,7 @@
 @property (nonatomic, assign) BOOL folder;
 @property (nonatomic, copy) NSString *version;
 @property (nonatomic, assign) int perms;
+@property (nonatomic, copy, nullable) NSString *linkTarget;
 @end
 
 @implementation SimpleFSItem
@@ -87,6 +88,11 @@
     return self.folder ? nil : @(self.size);
 }
 
+// Symbolic links are presented as links, with their target.
+- (NSString *)symlinkTargetPath {
+    return self.linkTarget;
+}
+
 #pragma mark - Error mapping
 
 + (NSError *)errorForCode:(int)code message:(NSString *)message {
@@ -131,9 +137,11 @@ static NSString *GoContainer(NSFileProviderItemIdentifier container) {
 + (SimpleFSItem *)itemFromDictionary:(NSDictionary *)d {
     NSString *name = d[@"name"];
     BOOL isDir = [d[@"isDir"] boolValue];
+    NSString *target = d[@"symlinkTarget"];
     UTType *type = isDir ? UTTypeFolder
-                         : ([UTType typeWithFilenameExtension:name.pathExtension] ?: UTTypeData);
-    return [[SimpleFSItem alloc] initWithIdentifier:d[@"id"]
+                 : target.length ? UTTypeSymbolicLink
+                 : ([UTType typeWithFilenameExtension:name.pathExtension] ?: UTTypeData);
+    SimpleFSItem *item = [[SimpleFSItem alloc] initWithIdentifier:d[@"id"]
                                        filename:name
                                        parentID:(d[@"parentID"] ?: @"")
                                     contentType:type
@@ -141,6 +149,8 @@ static NSString *GoContainer(NSFileProviderItemIdentifier container) {
                                        isFolder:isDir
                                         version:[d[@"version"] description]
                                           perms:[d[@"perms"] intValue]];
+    item.linkTarget = target.length ? target : nil;
+    return item;
 }
 
 + (NSDictionary *)resultFromGoJSON:(char *)json {

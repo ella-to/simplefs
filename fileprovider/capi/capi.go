@@ -150,6 +150,22 @@ func ProviderCreate(cname, cparent *C.char, cisDir C.int, csrc *C.char) *C.char 
 	return okItem(it)
 }
 
+// ProviderCreateSymlink handles a user-created symbolic link and returns
+// the result envelope.
+//
+//export ProviderCreateSymlink
+func ProviderCreateSymlink(cname, cparent, ctarget *C.char) *C.char {
+	b := fileprovider.Current()
+	if b == nil {
+		return noProvider()
+	}
+	it, err := b.CreateSymlink(C.GoString(cname), C.GoString(cparent), C.GoString(ctarget))
+	if err != nil {
+		return fail(err)
+	}
+	return okItem(it)
+}
+
 // ProviderUpdate handles a content edit (streamed from the local file csrc),
 // rename, and/or move and returns the result envelope.
 //

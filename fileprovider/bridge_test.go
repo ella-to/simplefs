@@ -380,3 +380,24 @@ func TestBridgeChangeTracking(t *testing.T) {
 		t.Fatalf("future anchor = %v, want CodeExpired", err)
 	}
 }
+
+func TestBridgeSymlinks(t *testing.T) {
+	b := NewBridge(memfs.New())
+	createFile(t, b, RootID, "target.txt", "t")
+	link, err := b.CreateSymlink("link", RootID, "target.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.SymlinkTarget != "target.txt" || link.Perms&PermWrite != 0 {
+		t.Fatalf("link item = %+v", link)
+	}
+	items, _ := b.ReadDir(RootID)
+	for _, it := range items {
+		if it.Name == "link" && it.SymlinkTarget != "target.txt" {
+			t.Fatalf("listed link = %+v", it)
+		}
+	}
+	if _, err := NewBridge(simplefs.ReadOnly(memfs.New())).CreateSymlink("x", RootID, "y"); err == nil {
+		t.Fatal("symlink on a read-only provider succeeded")
+	}
+}

@@ -59,6 +59,10 @@ type Item struct {
 	Version  string `json:"version"`
 	ParentID string `json:"parentID"`
 	Perms    Perm   `json:"perms"`
+
+	// SymlinkTarget is set for symbolic links; the host presents them as
+	// links (UTTypeSymbolicLink) rather than files.
+	SymlinkTarget string `json:"symlinkTarget,omitempty"`
 }
 
 // Code classifies an error so the host can map it to the NSError the system

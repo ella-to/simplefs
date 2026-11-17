@@ -101,9 +101,8 @@ func wrapErr(err error) error {
 	return &Error{Code: code, Msg: msg}
 }
 
-// item converts a FileInfo into the wire shape. Symlinks are exposed as plain
-// files (File Provider has no symlink concept); their content is whatever the
-// provider serves for the path.
+// item converts a FileInfo into the wire shape. Symlinks carry their target
+// (read through SymlinkProvider) so the host can present them as links.
 func (b *Bridge) item(info simplefs.FileInfo, id string) Item {
 	dir := info.Type.IsDir()
 	var size int64
@@ -126,7 +125,7 @@ func (b *Bridge) item(info simplefs.FileInfo, id string) Item {
 	if dir {
 		perms = PermRead | PermRename | PermMove | PermDelete | PermAddItems
 	}
-	return Item{
+	it := Item{
 		ID:       id,
 		Name:     name,
 		Size:     size,
@@ -135,6 +134,39 @@ func (b *Bridge) item(info simplefs.FileInfo, id string) Item {
 		ParentID: parentID,
 		Perms:    perms,
 	}
+	if info.Type.IsSymlink() {
+		if sp, ok := simplefs.As[simplefs.SymlinkProvider](b.p); ok {
+			if target, err := sp.Readlink(b.ctx, info.Path); err == nil {
+				it.SymlinkTarget = target
+				it.Perms &^= PermWrite // a link's "content" is its target
+			}
+		}
+	}
+	return it
+}
+
+// CreateSymlink adds a symbolic link the user created under parentID.
+func (b *Bridge) CreateSymlink(name, parentID, target string) (Item, error) {
+	parent, err := b.pathFor(parentID)
+	if err != nil {
+		return Item{}, err
+	}
+	if err := simplefs.ValidName(name); err != nil {
+		return Item{}, wrapErr(err)
+	}
+	sp, ok := simplefs.As[simplefs.SymlinkProvider](b.p)
+	if !ok {
+		return Item{}, &Error{Code: CodeUnsupported, Msg: "the provider does not support symbolic links"}
+	}
+	path := simplefs.JoinPath(parent, name)
+	if err := sp.Symlink(b.ctx, target, path); err != nil {
+		return Item{}, wrapErr(err)
+	}
+	info, err := b.p.Stat(b.ctx, path)
+	if err != nil {
+		return Item{}, wrapErr(err)
+	}
+	return b.item(info, b.idFor(path)), nil
 }
 
 // Root returns the top-level container. The host forces its identifier to the

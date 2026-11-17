@@ -56,6 +56,7 @@ char *ProviderCreate(char *name, char *parentID, int isDir, char *srcPath);
 char *ProviderUpdate(char *id, char *newName, char *newParentID,
                      int changedContent, int changedName, int changedParent,
                      char *srcPath);
+char *ProviderCreateSymlink(char *name, char *parentID, char *target);
 char *ProviderDelete(char *id);
 
 // Change tracking. ProviderTrackChanges starts it; notify is called from a
