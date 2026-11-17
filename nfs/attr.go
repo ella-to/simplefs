@@ -212,12 +212,12 @@ func readSattr3(r *xdrReader) sattr3 {
 // forwarded when the provider implements the matching capability.
 func (s *Server) applySattr(path string, id uint64, a sattr3) error {
 	if a.setSize {
-		h, err := s.files.acquire(s.ctx, id, path, true)
+		h, release, err := s.files.acquire(s.ctx, id, path, true)
 		if err != nil {
 			return err
 		}
 		err = h.Truncate(s.ctx, int64(a.size))
-		s.files.release(id)
+		release()
 		if err != nil {
 			return err
 		}

@@ -89,7 +89,7 @@ func NewServer(p simplefs.FileProvider, opts Options) *Server {
 		ctx:        context.Background(),
 		opts:       opts,
 		fh:         newFHTable(),
-		files:      newOpenCache(p),
+		files:      newOpenCache(p, 0),
 		createVerf: map[string][8]byte{},
 		conns:      map[net.Conn]struct{}{},
 		done:       make(chan struct{}),

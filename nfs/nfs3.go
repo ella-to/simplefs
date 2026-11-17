@@ -243,13 +243,13 @@ func (s *Server) opRead(r *xdrReader, w *xdrWriter) {
 	if count > maxIO {
 		count = maxIO
 	}
-	h, err := s.files.acquire(s.ctx, id, path, false)
+	h, release, err := s.files.acquire(s.ctx, id, path, false)
 	if err != nil {
 		w.uint32(errStatus(err))
 		postOpNone(w)
 		return
 	}
-	defer s.files.release(id)
+	defer release()
 	buf := make([]byte, count)
 	n, rerr := h.ReadAt(buf, int64(offset))
 	if rerr != nil && rerr != io.EOF {
@@ -295,13 +295,13 @@ func (s *Server) opWrite(r *xdrReader, w *xdrWriter) {
 	if int(count) < len(data) {
 		data = data[:count]
 	}
-	h, err := s.files.acquire(s.ctx, id, path, true)
+	h, release, err := s.files.acquire(s.ctx, id, path, true)
 	if err != nil {
 		w.uint32(errStatus(err))
 		wccNone(w)
 		return
 	}
-	defer s.files.release(id)
+	defer release()
 	n, werr := h.WriteAt(data, int64(offset))
 	if werr != nil {
 		w.uint32(errStatus(werr))
@@ -765,14 +765,14 @@ func (s *Server) opCommit(r *xdrReader, w *xdrWriter) {
 		wccNone(w)
 		return
 	}
-	h, err := s.files.acquire(s.ctx, id, path, true)
+	h, release, err := s.files.acquire(s.ctx, id, path, true)
 	if err != nil {
 		w.uint32(errStatus(err))
 		wccNone(w)
 		return
 	}
 	err = h.Sync(s.ctx)
-	s.files.release(id)
+	release()
 	if err != nil {
 		w.uint32(errStatus(err))
 		s.wccData(w, path, id)

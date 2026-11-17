@@ -123,10 +123,15 @@ func decodeFH(b []byte) (uint64, bool) {
 // closed after sitting idle, or eagerly when the path is removed, renamed,
 // or truncated.
 type openCache struct {
-	p       simplefs.FileProvider
+	p    simplefs.FileProvider
+	idle time.Duration
+
 	mu      sync.Mutex
 	entries map[uint64]*openEntry
 	closed  bool
+
+	stop chan struct{}
+	done chan struct{}
 }
 
 type openEntry struct {
@@ -134,33 +139,46 @@ type openEntry struct {
 	write    bool
 	refs     int
 	lastUsed time.Time
+
+	// retired entries are no longer in the cache map (superseded by a
+	// read-write handle, or their file was removed) and are closed by the
+	// last release.
+	retired bool
 }
 
-const openIdle = 5 * time.Second
+const defaultHandleIdle = 5 * time.Second
 
-func newOpenCache(p simplefs.FileProvider) *openCache {
-	c := &openCache{p: p, entries: map[uint64]*openEntry{}}
+func newOpenCache(p simplefs.FileProvider, idle time.Duration) *openCache {
+	if idle <= 0 {
+		idle = defaultHandleIdle
+	}
+	c := &openCache{
+		p:       p,
+		idle:    idle,
+		entries: map[uint64]*openEntry{},
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
 	go c.sweep()
 	return c
 }
 
 // acquire returns a live handle for the file identified by id/path, opening
 // one if needed (upgrading to read-write when write is requested). Callers
-// must pair it with release.
-func (c *openCache) acquire(ctx context.Context, id uint64, path string, write bool) (simplefs.FileHandle, error) {
+// must call the returned release func exactly once when done with h.
+func (c *openCache) acquire(ctx context.Context, id uint64, path string, write bool) (h simplefs.FileHandle, release func(), err error) {
 	c.mu.Lock()
 	if e, ok := c.entries[id]; ok && (e.write || !write) {
 		e.refs++
 		e.lastUsed = time.Now()
 		c.mu.Unlock()
-		return e.h, nil
+		return e.h, func() { c.release(e) }, nil
 	}
 	c.mu.Unlock()
 
-	opts := simplefs.OpenOptions{Read: true, Write: write}
-	h, err := c.p.Open(ctx, path, opts)
+	h, err = c.p.Open(ctx, path, simplefs.OpenOptions{Read: true, Write: write})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	c.mu.Lock()
@@ -171,91 +189,103 @@ func (c *openCache) acquire(ctx context.Context, id uint64, path string, write b
 			go h.Close()
 			old.refs++
 			old.lastUsed = time.Now()
-			return old.h, nil
+			return old.h, func() { c.release(old) }, nil
 		}
 		// Ours is the more capable handle: retire the read-only one.
-		if old.refs == 0 {
-			go old.h.Close()
-		} else {
-			// Still in use; let the sweeper close it once released.
-			delete(c.entries, id)
-			go func(e *openEntry) {
-				for {
-					time.Sleep(100 * time.Millisecond)
-					c.mu.Lock()
-					if e.refs == 0 {
-						c.mu.Unlock()
-						e.h.Close()
-						return
-					}
-					c.mu.Unlock()
-				}
-			}(old)
-		}
+		c.retireLocked(id, old)
 	}
 	e := &openEntry{h: h, write: write, refs: 1, lastUsed: time.Now()}
-	c.entries[id] = e
-	return h, nil
-}
-
-// release marks the handle acquired for id as no longer in use.
-func (c *openCache) release(id uint64) {
-	c.mu.Lock()
-	if e, ok := c.entries[id]; ok && e.refs > 0 {
-		e.refs--
-		e.lastUsed = time.Now()
+	if c.closed {
+		e.retired = true // closed by release; never cached
+	} else {
+		c.entries[id] = e
 	}
-	c.mu.Unlock()
+	return h, func() { c.release(e) }, nil
 }
 
-// drop closes the cached handle for id (used when the file is removed,
-// renamed over, or resized outside the handle).
+// retireLocked removes e from the map and closes it now if unused, or marks
+// it so the last release closes it.
+func (c *openCache) retireLocked(id uint64, e *openEntry) {
+	if c.entries[id] == e {
+		delete(c.entries, id)
+	}
+	e.retired = true
+	if e.refs == 0 {
+		go e.h.Close()
+	}
+}
+
+// release marks one use of e as finished.
+func (c *openCache) release(e *openEntry) {
+	c.mu.Lock()
+	e.refs--
+	e.lastUsed = time.Now()
+	closeNow := e.retired && e.refs == 0
+	c.mu.Unlock()
+	if closeNow {
+		e.h.Close()
+	}
+}
+
+// drop evicts the cached handle for id (used when the file is removed,
+// renamed over, or resized outside the handle). A handle still in use is
+// closed when its last user releases it.
 func (c *openCache) drop(id uint64) {
 	c.mu.Lock()
-	e, ok := c.entries[id]
-	if ok && e.refs == 0 {
-		delete(c.entries, id)
-	} else {
-		ok = false
-	}
-	c.mu.Unlock()
-	if ok {
-		e.h.Close()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[id]; ok {
+		c.retireLocked(id, e)
 	}
 }
 
 // sweep closes idle unreferenced handles until the cache is shut down.
 func (c *openCache) sweep() {
+	defer close(c.done)
+	t := time.NewTicker(c.idle / 2)
+	defer t.Stop()
 	for {
-		time.Sleep(openIdle)
-		c.mu.Lock()
-		if c.closed {
-			c.mu.Unlock()
+		select {
+		case <-c.stop:
 			return
-		}
-		var toClose []simplefs.FileHandle
-		now := time.Now()
-		for id, e := range c.entries {
-			if e.refs == 0 && now.Sub(e.lastUsed) >= openIdle {
-				toClose = append(toClose, e.h)
-				delete(c.entries, id)
+		case now := <-t.C:
+			var toClose []simplefs.FileHandle
+			c.mu.Lock()
+			for id, e := range c.entries {
+				if e.refs == 0 && now.Sub(e.lastUsed) >= c.idle {
+					toClose = append(toClose, e.h)
+					delete(c.entries, id)
+				}
 			}
-		}
-		c.mu.Unlock()
-		for _, h := range toClose {
-			h.Close()
+			c.mu.Unlock()
+			for _, h := range toClose {
+				h.Close()
+			}
 		}
 	}
 }
 
-// shutdown closes every cached handle and stops the sweeper.
+// shutdown stops the sweeper and closes every cached handle. Handles still
+// in use are closed by their last release.
 func (c *openCache) shutdown() {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
 	c.closed = true
 	entries := c.entries
 	c.entries = map[uint64]*openEntry{}
-	c.mu.Unlock()
+	var toClose []simplefs.FileHandle
 	for _, e := range entries {
-		e.h.Close()
+		e.retired = true
+		if e.refs == 0 {
+			toClose = append(toClose, e.h)
+		}
+	}
+	c.mu.Unlock()
+	close(c.stop)
+	<-c.done
+	for _, h := range toClose {
+		h.Close()
 	}
 }
