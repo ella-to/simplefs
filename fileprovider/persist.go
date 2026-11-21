@@ -127,11 +127,13 @@ func (j *journal) compact(b *Bridge) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, j.path); err != nil {
-		return err
-	}
+	// Close the live log first: Windows refuses to replace an open file.
 	if j.f != nil {
 		j.f.Close()
+		j.f = nil
+	}
+	if err := os.Rename(tmp, j.path); err != nil {
+		return err
 	}
 	j.f, err = os.OpenFile(j.path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -140,6 +142,18 @@ func (j *journal) compact(b *Bridge) error {
 	j.w = bufio.NewWriter(j.f)
 	j.lines = n
 	return nil
+}
+
+// close closes the log file.
+func (j *journal) close() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.f == nil {
+		return nil
+	}
+	err := j.f.Close()
+	j.f = nil
+	return err
 }
 
 // record appends one operation and flushes it.

@@ -322,7 +322,10 @@ func TestBridgeIDsSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A new process: same provider, fresh bridge, same journal.
+	// A new process: same provider, fresh bridge, same journal. The old
+	// process is gone, so its log file is closed (Windows cannot replace an
+	// open file).
+	b1.journal.Load().close()
 	b2 := NewBridge(p)
 	if err := b2.Persist(state); err != nil {
 		t.Fatal(err)
