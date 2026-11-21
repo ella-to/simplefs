@@ -10,6 +10,10 @@
 // the OS supports them; otherwise ErrNotSupported). Watching is not
 // implemented: the standard library has no portable change notification.
 //
+// On Windows, permission bits are synthesized from the read-only attribute
+// (Chmod can only toggle it), and a file cannot be renamed, nor a directory
+// above it, while a handle to it is open.
+//
 // FileInfo.ETag is left empty: modification times on many filesystems are
 // too coarse to version every write, and an ETag that does not change on a
 // write is worse than none.
@@ -21,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -392,7 +397,8 @@ func (f *FS) Readlink(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", pathErr("readlink", path, err)
 	}
-	return target, nil
+	// Windows stores targets with backslashes; simplefs paths use slashes.
+	return filepath.ToSlash(target), nil
 }
 
 // Symlink creates linkPath pointing at target.

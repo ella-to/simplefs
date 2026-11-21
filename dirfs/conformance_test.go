@@ -22,5 +22,9 @@ func TestConformance(t *testing.T) {
 		// NFC and NFD spellings as the same name.
 		CaseInsensitive:   runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		NormalizesUnicode: runtime.GOOS == "darwin",
+		// NTFS has only a read-only attribute, and refuses to rename a
+		// file (or a directory above it) while it is open.
+		SynthesizedMode:      runtime.GOOS == "windows",
+		OpenFilesBlockRename: runtime.GOOS == "windows",
 	})
 }
