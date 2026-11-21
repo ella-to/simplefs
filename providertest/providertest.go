@@ -43,6 +43,16 @@ type Options struct {
 	// distinct names (APFS).
 	NormalizesUnicode bool
 
+	// SynthesizedMode skips checks that requested permission bits are
+	// stored and reported back (Windows, where only a read-only attribute
+	// exists and the OS synthesizes the rest of the mode).
+	SynthesizedMode bool
+
+	// OpenFilesBlockRename skips checks that rename a file, or a directory
+	// above it, while a handle to it is open (Windows refuses with "Access
+	// is denied").
+	OpenFilesBlockRename bool
+
 	// MaxNameLength is the longest name the provider accepts, in bytes.
 	// Zero means simplefs.MaxNameLength (255).
 	MaxNameLength int
@@ -340,7 +350,7 @@ func (s *suite) open(t *testing.T) {
 		h.Close()
 		info, err := p.Stat(ctx, "/f")
 		must(t, err)
-		if info.Mode != 0 && info.Mode.Perm() != 0o600 {
+		if !s.opts.SynthesizedMode && info.Mode != 0 && info.Mode.Perm() != 0o600 {
 			t.Errorf("mode = %v, want 0600", info.Mode)
 		}
 		// Mode is ignored for an existing file.
@@ -467,6 +477,9 @@ func (s *suite) handle(t *testing.T) {
 		}
 	})
 	s.run(t, "SurvivesRename", func(t *testing.T, ctx context.Context, p simplefs.FileProvider) {
+		if s.opts.OpenFilesBlockRename {
+			t.Skip("provider cannot rename open files")
+		}
 		mkdir(t, ctx, p, "/a")
 		write(t, ctx, p, "/a/f", "abc")
 		h := open(t, ctx, p, "/a/f", rw)
@@ -649,7 +662,7 @@ func (s *suite) mkdir(t *testing.T) {
 		must(t, p.Mkdir(ctx, "/d", simplefs.MkdirOptions{Mode: 0o700}))
 		info, err := p.Stat(ctx, "/d")
 		must(t, err)
-		if info.Mode != 0 && info.Mode.Perm() != 0o700 {
+		if !s.opts.SynthesizedMode && info.Mode != 0 && info.Mode.Perm() != 0o700 {
 			t.Errorf("mode = %v, want 0700", info.Mode)
 		}
 	})
@@ -860,7 +873,7 @@ func (s *suite) chmod(t *testing.T) {
 		must(t, err)
 		info, err := p.Stat(ctx, "/f")
 		must(t, err)
-		if info.Mode.Perm() != 0o640 {
+		if !s.opts.SynthesizedMode && info.Mode.Perm() != 0o640 {
 			t.Errorf("mode = %v, want 0640", info.Mode)
 		}
 		wantErr(t, "Chmod(missing)", cp.Chmod(ctx, "/missing", 0o600), simplefs.ErrNotExist)
