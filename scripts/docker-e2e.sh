@@ -13,6 +13,10 @@
 #   checked through docker exec. The mount must sit at the requested path
 #   itself, not behind a symlink.
 #
+# Scenarios B and C run with AppArmor unconfined: on hosts that enforce
+# Docker's default AppArmor profile (Ubuntu, including GitHub's runners) it
+# denies mount(2) even with CAP_SYS_ADMIN.
+#
 # Scenario C — a crashed server:
 #   the mounting process is SIGKILLed; operations on the mount must fail
 #   (soft mount) instead of hanging, and the next mount.Mount must detach the
@@ -25,7 +29,17 @@ SERVER=simplefs-e2e-server
 MOUNTER=simplefs-e2e-mounter
 CRASHER=simplefs-e2e-crasher
 
+MOUNTOPTS="--cap-add SYS_ADMIN --security-opt apparmor=unconfined"
+
 cleanup() {
+    status=$?
+    if [ "$status" != 0 ]; then
+        for c in "$SERVER" "$MOUNTER" "$CRASHER"; do
+            docker logs "$c" >/dev/null 2>&1 || continue
+            echo "-- logs of $c:"
+            docker logs "$c" 2>&1 | tail -50
+        done
+    fi
     docker rm -f "$SERVER" "$MOUNTER" "$CRASHER" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
@@ -79,7 +93,7 @@ docker run --rm --privileged --network "$NET" alpine:3.22 sh -eu -c '
 '
 
 echo "== Scenario B: in-container mount via mount.Mount (mount_linux.go)"
-docker run -d --name "$MOUNTER" --cap-add SYS_ADMIN "$IMG" --mount /mnt/simplefs >/dev/null
+docker run -d --name "$MOUNTER" $MOUNTOPTS "$IMG" --mount /mnt/simplefs >/dev/null
 docker exec "$MOUNTER" sh -eu -c '
     for i in $(seq 1 20); do
         mountpoint -q /mnt/simplefs && break
@@ -96,7 +110,7 @@ docker exec "$MOUNTER" sh -eu -c '
 '
 
 echo "== Scenario C: crashed server -> soft failure, then CleanupStale"
-docker run -d --name "$CRASHER" --cap-add SYS_ADMIN --entrypoint sh "$IMG" -c 'sleep 3600' >/dev/null
+docker run -d --name "$CRASHER" $MOUNTOPTS --entrypoint sh "$IMG" -c 'sleep 3600' >/dev/null
 docker exec -d "$CRASHER" nfsserver --mount /mnt/dead
 docker exec "$CRASHER" sh -eu -c '
     for i in $(seq 1 20); do

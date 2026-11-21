@@ -16,7 +16,8 @@ Variations:
   to its command.
 - **Mount on the host**: publish `2049:2049` and use the commands that
   `nfsserver` prints at startup (Linux `mount -t nfs`, macOS `mount_nfs`).
-- **Mount inside one container** (needs `cap_add: [SYS_ADMIN]`): run
+- **Mount inside one container** (needs `cap_add: [SYS_ADMIN]`, plus
+  `security_opt: [apparmor:unconfined]` on AppArmor hosts): run
   `nfsserver --mount /mnt/simplefs`; see `scripts/docker-e2e.sh` scenario B.
 
 See `guide.md` ("Docker") for the full matrix of hosts.

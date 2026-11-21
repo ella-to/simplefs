@@ -332,7 +332,7 @@ docker run -d --name simplefs -p 2049:2049 simplefs-nfs   # unprivileged
   The daemon (on Docker Desktop/OrbStack/Colima: the Linux VM) performs the
   mount, so `addr` must be reachable from it — the server container's IP,
   never `127.0.0.1`.
-- **In-container mount**: `docker run --cap-add SYS_ADMIN simplefs-nfs --mount /mnt/x`
+- **In-container mount**: `docker run --cap-add SYS_ADMIN simplefs-nfs --mount /mnt/x` (add `--security-opt apparmor=unconfined` on hosts enforcing AppArmor, such as Ubuntu)
   (some hosts also need `--security-opt apparmor=unconfined`); share it with
   a bind mount using `:rshared` propagation.
 - **Serve a host directory**: `-v "$PWD/data:/data" … --backend dir --dir /data`.

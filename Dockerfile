@@ -16,9 +16,11 @@
 #   docker run --rm -v simplefs:/data alpine ls /data
 #
 # To mount INSIDE a container instead (and expose it through a shared bind
-# mount), the container needs CAP_SYS_ADMIN:
+# mount), the container needs CAP_SYS_ADMIN (and, on hosts enforcing
+# AppArmor such as Ubuntu, an unconfined profile):
 #
-#   docker run --rm --cap-add SYS_ADMIN simplefs-nfs --mount /mnt/simplefs
+#   docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+#     simplefs-nfs --mount /mnt/simplefs
 #
 # Serve a host directory instead of memory:
 #
