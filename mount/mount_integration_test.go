@@ -47,6 +47,15 @@ func mountMem(t *testing.T, opts mount.Options) (*memfs.FS, *mount.Point) {
 	return p, m
 }
 
+// skipOnWindows skips tests that mount at a directory: Windows mounts only
+// at drive letters, and CleanupStale is a no-op there.
+func skipOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows mounts at drive letters, not directories")
+	}
+}
+
 func TestMountFileIO(t *testing.T) {
 	p, m := mountMem(t, mount.Options{Name: "iotest"})
 	root := m.Path()
@@ -117,6 +126,7 @@ func TestMountReadOnly(t *testing.T) {
 }
 
 func TestMountExplicitPathAndUnmount(t *testing.T) {
+	skipOnWindows(t)
 	dir := filepath.Join(t.TempDir(), "mnt")
 	_, m := mountMem(t, mount.Options{Name: "pathtest", Path: dir})
 	if m.Path() != dir {
@@ -156,6 +166,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestCleanupStaleAfterCrash(t *testing.T) {
+	skipOnWindows(t)
 	dir := filepath.Join(t.TempDir(), "crash")
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), "SIMPLEFS_CRASH_CHILD="+dir)
